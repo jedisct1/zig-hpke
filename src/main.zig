@@ -9,9 +9,7 @@ const ArrayList = std.ArrayList;
 
 const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 
-pub const Mode: u8 = enum {
-    base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03
-};
+pub const Mode: u8 = enum { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
 
 pub const primitives = struct {
     pub const Kem = struct {
@@ -353,13 +351,9 @@ const Context = struct {
     }
 };
 
-pub const ClientContext = struct {
-    ctx: Context
-};
+pub const ClientContext = struct { ctx: Context };
 
-pub const ServerContext = struct {
-    ctx: Context
-};
+pub const ServerContext = struct { ctx: Context };
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .safety = true }){};
@@ -374,19 +368,19 @@ pub fn main() anyerror!void {
 
         var info_hex = "4f6465206f6e2061204772656369616e2055726e";
         var info: [info_hex.len / 2]u8 = undefined;
-        try std.fmt.hexToBytes(&info, info_hex);
+        _ = try std.fmt.hexToBytes(&info, info_hex);
 
         const server_seed_hex = "6d9014e4609687b0a3670a22f2a14eac5ae6ad8c0beb62fb3ecb13dc8ebf5e06";
         var server_seed: [server_seed_hex.len / 2]u8 = undefined;
-        try std.fmt.hexToBytes(&server_seed, server_seed_hex);
+        _ = try std.fmt.hexToBytes(&server_seed, server_seed_hex);
         var server_kp = try suite.deterministicKeyPair(&server_seed);
 
         const client_seed_hex = "6305de86b3cec022fae6f2f2d2951f0f90c8662112124fd62f17e0a99bdbd08e";
         var client_seed: [client_seed_hex.len / 2]u8 = undefined;
-        try std.fmt.hexToBytes(&client_seed, client_seed_hex);
+        _ = try std.fmt.hexToBytes(&client_seed, client_seed_hex);
         var client_kp = try suite.deterministicKeyPair(&client_seed);
 
-        std.log.info("All your codebase are belong to us. {x} {x}\n", .{ client_kp.secret_key, client_kp.public_key });
+        std.log.info("All your codebase are belong to us. {s} {s}\n", .{ std.fmt.fmtSliceHexLower(client_kp.secret_key), std.fmt.fmtSliceHexLower(client_kp.public_key) });
     }
     _ = gpa.deinit();
 }
