@@ -9,20 +9,26 @@ const ArrayList = std.ArrayList;
 
 const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 
-pub const Mode: u8 = enum { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
+pub const Mode = enum(u8) { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
 
 pub const primitives = struct {
     pub const Kem = struct {
         id: u16,
         secret_length: usize,
+        public_length: usize,
+        shared_length: usize,
+        digest_length: usize,
         generateKeyPairFn: fn (allocator: *Allocator) anyerror!KeyPair,
         deterministicKeyPairFn: fn (allocator: *Allocator, secret_key: []const u8) anyerror!KeyPair,
+        dhFn: fn (out: []u8, pk: []const u8, sk: []const u8) anyerror!void,
 
         pub const X25519HkdfSha256 = struct {
             const H = crypto.hash.sha2.Sha256;
             const K = crypto.kdf.hkdf.HkdfSha256;
             pub const id: u16 = 0x0020;
             pub const secret_length: usize = crypto.dh.X25519.secret_length;
+            pub const public_length: usize = crypto.dh.X25519.public_length;
+            pub const shared_length: usize = crypto.dh.X25519.shared_length;
 
             fn generateKeyPair(allocator: *Allocator) !KeyPair {
                 const kp = try crypto.dh.X25519.KeyPair.create(null);
@@ -43,11 +49,23 @@ pub const primitives = struct {
                 };
             }
 
+            fn dh(out: []u8, pk: []const u8, sk: []const u8) !void {
+                if (pk.len != public_length or sk.len != secret_length or out.len != shared_length) {
+                    return error.InvalidParameters;
+                }
+                const dh_secret = try crypto.dh.X25519.scalarmult(sk[0..secret_length].*, pk[0..public_length].*);
+                mem.copy(u8, out, &dh_secret);
+            }
+
             pub const kem = Kem{
                 .id = 0x0020,
                 .secret_length = secret_length,
+                .shared_length = shared_length,
+                .public_length = public_length,
+                .digest_length = H.digest_length,
                 .generateKeyPairFn = generateKeyPair,
                 .deterministicKeyPairFn = deterministicKeyPair,
+                .dhFn = dh,
             };
         };
 
@@ -176,6 +194,12 @@ pub const KeyPair = struct {
         kp.allocator.free(kp.public_key);
         kp.allocator.free(kp.secret_key);
     }
+
+    pub fn intoPublic(kp: *KeyPair) []const u8 {
+        std.crypto.utils.secureZero(u8, kp.secret_key);
+        kp.allocator.free(kp.secret_key);
+        return kp.public_key;
+    }
 };
 
 const AeadState = union(primitives.AeadId) {
@@ -271,7 +295,7 @@ pub const Suite = struct {
         }
     };
 
-    fn labeledExtract(suite: *Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
+    pub fn labeledExtract(suite: *Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
         var secret = try ArrayList(u8).initCapacity(&suite.arena.allocator, hpke_version.len + suite_id.len + label.len + ikm.len);
         errdefer secret.deinit();
         try secret.appendSlice(&hpke_version);
@@ -284,7 +308,7 @@ pub const Suite = struct {
         return prk;
     }
 
-    fn labeledExpand(suite: *Suite, out: []u8, prk: *Prk, suite_id: []const u8, label: []const u8, info: ?[]const u8) !void {
+    pub fn labeledExpand(suite: *Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
         var out_length = [_]u8{ 0, 0 };
         mem.writeIntBig(u16, &out_length, @intCast(u16, out.len));
         var labeled_info = try ArrayList(u8).initCapacity(prk.allocator, out_length.len + hpke_version.len + suite_id.len + label.len + if (info) |i| i.len else 0);
@@ -299,7 +323,7 @@ pub const Suite = struct {
 
     fn verifyPskInputs(mode: Mode, psk: ?Psk) !void {
         if (psk) |p| {
-            if ((p.key.len == 0) != (psk.id.len == 0)) {
+            if ((p.key.len == 0) != (psk == null)) {
                 return error.PskKeyAndIdMustBeSet;
             }
             if (mode == .base or mode == .auth) {
@@ -310,18 +334,27 @@ pub const Suite = struct {
         }
     }
 
-    fn keySchedule(suite: *const Suite, mode: Mode, dh_secret: []const u8, info: []const u8, psk: ?Psk) !Context {
+    fn keySchedule(suite: *Suite, mode: Mode, dh_secret: []const u8, info: []const u8, psk: ?Psk) !Context {
         try verifyPskInputs(mode, psk);
-        var psk_id_hash = try suite.labeledExtract(suite.id.context, null, "psk_id_hash", if (psk) |p| p.id else []u8{});
-        defer suite.arena.allocator.free(psk_id_hash);
-        var info_hash = try suite.labeledExtract(suite.id.context, null, "info_hash", info);
-        defer suite.arena.allocator.free(info_hash);
-        var key_schedule_context = try ArrayList(u8).initCapacity(&suite.arena.allocator, 4);
-        try key_schedule_context.append(mode);
-        try key_schedule_context.appendSlice(psk_id_hash);
-        try key_schedule_context.appendSlice(info_hash);
-        var secret = suite.labeledExtract(suite.id.context, dh_secret, "secret", if (psk) |p| p.key else []u8{});
-        defer suite.arena.allocator.free(secret);
+        const psk_id: []const u8 = if (psk) |p| p.id else &[_]u8{};
+        var psk_id_hash = try suite.labeledExtract(&suite.id.context, null, "psk_id_hash", psk_id);
+        defer psk_id_hash.deinit();
+        var info_hash = try suite.labeledExtract(&suite.id.context, null, "info_hash", info);
+        defer info_hash.deinit();
+        var key_schedule_ctx = try ArrayList(u8).initCapacity(&suite.arena.allocator, 4);
+        try key_schedule_ctx.append(@enumToInt(mode));
+        try key_schedule_ctx.appendSlice(psk_id_hash.bytes);
+        try key_schedule_ctx.appendSlice(info_hash.bytes);
+        var secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_id);
+        defer secret.deinit();
+        var exporter_secret = try suite.arena.allocator.alloc(u8, suite.kdf.prk_length);
+        errdefer suite.arena.allocator.free(exporter_secret);
+        try suite.labeledExpand(exporter_secret, &suite.id.context, secret, "exp", key_schedule_ctx.items);
+        return Context{
+            .allocator = &suite.arena.allocator,
+            .suite = suite,
+            .exporter_secret = exporter_secret,
+        };
     }
 
     pub fn generateKeyPair(suite: *Suite) !KeyPair {
@@ -333,25 +366,72 @@ pub const Suite = struct {
         defer prk.deinit();
         var secret_key = try suite.arena.allocator.alloc(u8, suite.kem.secret_length);
         errdefer suite.arena.allocator.free(seed);
-        try suite.labeledExpand(secret_key, &prk, &suite.id.kem, "sk", null);
+        try suite.labeledExpand(secret_key, &suite.id.kem, prk, "sk", null);
         return suite.kem.deterministicKeyPairFn(&suite.arena.allocator, secret_key);
+    }
+
+    fn extractAndExpandDh(suite: *Suite, dh: []const u8, kem_ctx: []const u8) ![]const u8 {
+        const prk = try suite.labeledExtract(&suite.id.kem, null, "eae_prk", dh);
+        var dh_secret = try suite.arena.allocator.alloc(u8, suite.kem.digest_length);
+        errdefer suite.arena.allocator.free(dh_secret);
+        try suite.labeledExpand(dh_secret, &suite.id.kem, prk, "shared_secret", kem_ctx);
+        return dh_secret;
+    }
+
+    pub const EncapsulatedSecret = struct {
+        secret: []const u8,
+        encapsulated: []const u8,
+    };
+
+    pub fn encap(suite: *Suite, server_pk: []const u8, seed: ?[]const u8) !EncapsulatedSecret {
+        var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair();
+        errdefer eph_kp.deinit();
+        var dh = try suite.arena.allocator.alloc(u8, suite.kem.shared_length);
+        defer suite.arena.allocator.free(dh);
+        try suite.kem.dhFn(dh, server_pk, eph_kp.secret_key);
+        var kem_ctx = try std.ArrayList(u8).initCapacity(&suite.arena.allocator, eph_kp.public_key.len + server_pk.len);
+        defer kem_ctx.deinit();
+        kem_ctx.appendSliceAssumeCapacity(eph_kp.public_key);
+        kem_ctx.appendSliceAssumeCapacity(server_pk);
+        const dh_secret = try suite.extractAndExpandDh(dh, kem_ctx.items);
+        return EncapsulatedSecret{
+            .secret = dh_secret,
+            .encapsulated = eph_kp.intoPublic(),
+        };
+    }
+
+    pub const Client = struct {
+        client_ctx: ClientContext,
+        encapsulated_secret: EncapsulatedSecret,
+    };
+
+    pub fn createClientDeterministicContext(suite: *Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !Client {
+        const encapsulated_secret = try suite.encap(server_pk, seed);
+        const mode: Mode = if (psk) |_| .psk else .base;
+        const inner_ctx = try suite.keySchedule(mode, encapsulated_secret.secret, info, psk);
+        const client_ctx = ClientContext{ .ctx = inner_ctx };
+        return Client{
+            .client_ctx = client_ctx,
+            .encapsulated_secret = encapsulated_secret,
+        };
     }
 };
 
 const Context = struct {
     allocator: *Allocator,
     suite: *Suite,
-    key_schedule_context: ArrayList(u8),
-    secret: []u8,
+    exporter_secret: []const u8,
 
     fn deinit(ctx: *Context) void {
-        ctx.key_schedule_context.deinit();
-        crypto.utils.secureZero(u8, ctx.secret);
-        ctx.allocator.free(ctx.secret);
+        ctx.key_schedule_ctx.deinit();
+        crypto.utils.secureZero(u8, ctx.exporter_secret);
+        ctx.allocator.free(ctx.exporter_secret);
     }
 };
 
-pub const ClientContext = struct { ctx: Context };
+pub const ClientContext = struct {
+    ctx: Context,
+};
 
 pub const ServerContext = struct { ctx: Context };
 
@@ -370,17 +450,28 @@ pub fn main() anyerror!void {
         var info: [info_hex.len / 2]u8 = undefined;
         _ = try std.fmt.hexToBytes(&info, info_hex);
 
-        const server_seed_hex = "6d9014e4609687b0a3670a22f2a14eac5ae6ad8c0beb62fb3ecb13dc8ebf5e06";
+        const server_seed_hex = "29e5fcb544130784b7606e3160d736309d63e044c241d4461a9c9d2e9362f1db";
         var server_seed: [server_seed_hex.len / 2]u8 = undefined;
         _ = try std.fmt.hexToBytes(&server_seed, server_seed_hex);
         var server_kp = try suite.deterministicKeyPair(&server_seed);
 
-        const client_seed_hex = "6305de86b3cec022fae6f2f2d2951f0f90c8662112124fd62f17e0a99bdbd08e";
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, "ad5e716159a11fdb33527ce98fe39f24ae3449ffb6e93e8911f62c0e9781718a");
+        debug.assert(mem.eql(u8, &expected, server_kp.secret_key));
+        _ = try std.fmt.hexToBytes(&expected, "46570dfa9f66e17c38e7a081c65cf42bc00e6fed969d326c692748ae866eac6f");
+        debug.assert(mem.eql(u8, &expected, server_kp.public_key));
+
+        const client_seed_hex = "3b8ed55f38545e6ea459b6838280b61ff4f5df2a140823373380609fb6c68933";
         var client_seed: [client_seed_hex.len / 2]u8 = undefined;
         _ = try std.fmt.hexToBytes(&client_seed, client_seed_hex);
         var client_kp = try suite.deterministicKeyPair(&client_seed);
 
-        std.log.info("All your codebase are belong to us. {s} {s}\n", .{ std.fmt.fmtSliceHexLower(client_kp.secret_key), std.fmt.fmtSliceHexLower(client_kp.public_key) });
+        const client = try suite.createClientDeterministicContext(server_kp.public_key, &info, null, &client_seed);
+        _ = try std.fmt.hexToBytes(&expected, "e7d9aa41faa0481c005d1343b26939c0748a5f6bf1f81fbd1a4e924bf0719149");
+        debug.assert(mem.eql(u8, &expected, client.encapsulated_secret.encapsulated));
+
+        _ = try std.fmt.hexToBytes(&expected, "d27ca8c6ce9d8998f3692613c29e5ae0b064234b874a52d65a014eeffed429b9");
+        debug.assert(mem.eql(u8, &expected, client.client_ctx.ctx.exporter_secret));
     }
     _ = gpa.deinit();
 }
