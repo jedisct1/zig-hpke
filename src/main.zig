@@ -58,6 +58,8 @@ const max_info_length: usize = 64;
 const max_suite_id_length: usize = 10;
 const max_digest_length: usize = 32;
 const max_ikm_length: usize = 64;
+const max_aead_key_length: usize = 32;
+const max_aead_nonce_length: usize = 12;
 
 pub const primitives = struct {
     pub const Kem = struct {
@@ -167,41 +169,42 @@ pub const primitives = struct {
         key_length: usize,
         nonce_length: usize,
         tag_length: usize,
+        newStateFn: fn (key: []const u8, base_nonce: []const u8) error{ InvalidParameters, SliceTooBig }!State,
+        encryptFn: fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
+        decryptFn: fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
 
         pub const State = struct {
             aead: Aead,
-            key: [32]u8 = undefined,
-            base_nonce: [32]u8 = undefined,
-            counter: [32]u8 = [_]u8{0} ** 32,
-            encryptFn: fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
-            decryptFn: fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) !void,
+            base_nonce: FixedSlice(u8, max_aead_nonce_length),
+            counter: FixedSlice(u8, max_aead_nonce_length),
+            key: FixedSlice(u8, max_aead_key_length),
         };
 
         pub const Aes128Gcm = struct {
             const A = crypto.aead.aes_gcm.Aes128Gcm;
             pub const id: u16 = 0x0001;
 
-            fn newState(key: []const u8, base_nonce: []const u8) State {
-                debug.assert(key.len == A.key_length);
-                debug.assert(base_nonce.len == A.nonce_length);
+            fn newState(key: []const u8, base_nonce: []const u8) error{ InvalidParameters, SliceTooBig }!State {
+                if (key.len != A.key_length or base_nonce.len != A.nonce_length) {
+                    return error.InvalidParameters;
+                }
+                var counter = try FixedSlice(u8, max_aead_nonce_length).init(A.nonce_length);
+                mem.set(u8, counter.slice(), 0);
                 var state = State{
-                    .aead = aead,
-                    .encryptFn = encrypt,
-                    .decryptFn = decrypt,
+                    .aead = @This().aead,
+                    .base_nonce = try FixedSlice(u8, max_aead_nonce_length).fromSlice(base_nonce),
+                    .counter = counter,
+                    .key = try FixedSlice(u8, max_aead_key_length).fromSlice(key),
                 };
-                comptime debug.assert(state.key.len >= A.key_length);
-                comptime debug.assert(state.base_nonce.len >= A.nonce_length);
-                mem.copy(u8, state.key, key);
-                mem.copy(u8, state.base_nonce, base_nonce);
                 return state;
             }
 
             fn encrypt(c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void {
-                A.encrypt(c[0..m.len], c[m.len..][0..A.tag_length], m, ad, nonce[0..A.nonce_length], key[0..A.key_length]);
+                A.encrypt(c[0..m.len], c[m.len..][0..A.tag_length], m, ad, nonce[0..A.nonce_length].*, key[0..A.key_length].*);
             }
 
             fn decrypt(m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) !void {
-                return A.decrypt(m, c[0..m.len], c[m.len..][0..A.tag_length], ad, nonce[0..A.nonce_length], key[0..A.key_length]);
+                return A.decrypt(m, c[0..m.len], c[m.len..][0..A.tag_length].*, ad, nonce[0..A.nonce_length].*, key[0..A.key_length].*);
             }
 
             pub const aead = Aead{
@@ -209,6 +212,9 @@ pub const primitives = struct {
                 .key_length = A.key_length,
                 .nonce_length = A.nonce_length,
                 .tag_length = A.tag_length,
+                .newStateFn = newState,
+                .encryptFn = encrypt,
+                .decryptFn = decrypt,
             };
         };
 
@@ -363,6 +369,16 @@ pub const Suite = struct {
         var secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_id);
         var exporter_secret = try FixedSlice(u8, max_prk_length).init(suite.kdf.prk_length);
         try suite.labeledExpand(exporter_secret.slice(), &suite.id.context, secret, "exp", key_schedule_ctx.items);
+
+        var outbound_state: ?primitives.Aead.State = if (suite.aead) |aead| blk: {
+            var outbound_key = try FixedSlice(u8, max_aead_key_length).init(aead.key_length);
+            try suite.labeledExpand(outbound_key.slice(), &suite.id.context, secret, "key", key_schedule_ctx.items);
+            var outbound_base_nonce = try FixedSlice(u8, max_aead_nonce_length).init(aead.nonce_length);
+            try suite.labeledExpand(outbound_base_nonce.slice(), &suite.id.context, secret, "base_nonce", key_schedule_ctx.items);
+            var outbound_state = try aead.newStateFn(outbound_key.constSlice(), outbound_base_nonce.constSlice());
+            break :blk null;
+        } else null;
+
         return Context{
             .suite = suite,
             .exporter_secret = exporter_secret,
