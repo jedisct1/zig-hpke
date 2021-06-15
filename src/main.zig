@@ -266,24 +266,6 @@ pub const KeyPair = struct {
     secret_key: FixedSlice(u8, max_secret_key_length),
 };
 
-const AeadState = union(primitives.AeadId) {
-    aes128gcm: struct {
-        const Aead = primitives.Aead.aes128gcm;
-        baseNonce: [Aead.nonce_length]u8,
-        counter: [Aead.nonce_length]u8 = [_]u8{0} ** Aead.nonce_length,
-    },
-    aes256gcm: struct {
-        const Aead = primitives.Aead.aes256gcm;
-        baseNonce: [Aead.nonce_length]u8,
-        counter: [Aead.nonce_length]u8 = [_]u8{0} ** Aead.nonce_length,
-    },
-    chacha20Poly1305: struct {
-        const Aead = primitives.Aead.chacha20Poly1305;
-        baseNonce: [Aead.nonce_length]u8,
-        counter: [Aead.nonce_length]u8 = [_]u8{0} ** Aead.nonce_length,
-    },
-};
-
 pub const Suite = struct {
     id: struct {
         context: [10]u8,
@@ -337,7 +319,7 @@ pub const Suite = struct {
 
     pub const Prk = FixedSlice(u8, max_prk_length);
 
-    pub fn labeledExtract(suite: *Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
+    pub fn labeledExtract(suite: Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
         var buffer: [hpke_version.len + max_suite_id_length + max_label_length + max_ikm_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var secret = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
@@ -351,7 +333,7 @@ pub const Suite = struct {
         return prk;
     }
 
-    pub fn labeledExpand(suite: *Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
+    pub fn labeledExpand(suite: Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
         var out_length = [_]u8{ 0, 0 };
         mem.writeIntBig(u16, &out_length, @intCast(u16, out.len));
         var buffer: [out_length.len + hpke_version.len + max_suite_id_length + max_label_length + max_info_length]u8 = undefined;
@@ -378,7 +360,7 @@ pub const Suite = struct {
         }
     }
 
-    fn keySchedule(suite: *Suite, mode: Mode, dh_secret: []const u8, info: []const u8, psk: ?Psk) !Context {
+    fn keySchedule(suite: Suite, mode: Mode, dh_secret: []const u8, info: []const u8, psk: ?Psk) !Context {
         try verifyPskInputs(mode, psk);
         const psk_id: []const u8 = if (psk) |p| p.id else &[_]u8{};
         var psk_id_hash = try suite.labeledExtract(&suite.id.context, null, "psk_id_hash", psk_id);
@@ -409,18 +391,18 @@ pub const Suite = struct {
         };
     }
 
-    pub fn generateKeyPair(suite: *Suite) !KeyPair {
+    pub fn generateKeyPair(suite: Suite) !KeyPair {
         return suite.kem.generateKeyPairFn();
     }
 
-    pub fn deterministicKeyPair(suite: *Suite, seed: []const u8) !KeyPair {
+    pub fn deterministicKeyPair(suite: Suite, seed: []const u8) !KeyPair {
         var prk = try suite.labeledExtract(&suite.id.kem, null, "dkp_prk", seed);
         var secret_key = try FixedSlice(u8, max_secret_key_length).init(suite.kem.secret_length);
         try suite.labeledExpand(secret_key.slice(), &suite.id.kem, prk, "sk", null);
         return suite.kem.deterministicKeyPairFn(secret_key.constSlice());
     }
 
-    fn extractAndExpandDh(suite: *Suite, dh: []const u8, kem_ctx: []const u8) !FixedSlice(u8, max_shared_key_length) {
+    fn extractAndExpandDh(suite: Suite, dh: []const u8, kem_ctx: []const u8) !FixedSlice(u8, max_shared_key_length) {
         const prk = try suite.labeledExtract(&suite.id.kem, null, "eae_prk", dh);
         var dh_secret = try FixedSlice(u8, max_digest_length).init(suite.kem.shared_length);
         try suite.labeledExpand(dh_secret.slice(), &suite.id.kem, prk, "shared_secret", kem_ctx);
@@ -432,7 +414,7 @@ pub const Suite = struct {
         encapsulated: FixedSlice(u8, max_public_key_length),
     };
 
-    pub fn encap(suite: *Suite, server_pk: []const u8, seed: ?[]const u8) !EncapsulatedSecret {
+    pub fn encap(suite: Suite, server_pk: []const u8, seed: ?[]const u8) !EncapsulatedSecret {
         var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair();
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh.slice(), server_pk, eph_kp.secret_key.slice());
@@ -448,7 +430,7 @@ pub const Suite = struct {
         };
     }
 
-    pub fn decap(suite: *Suite, eph_pk: []const u8, server_kp: KeyPair) !FixedSlice(u8, max_shared_key_length) {
+    pub fn decap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair) !FixedSlice(u8, max_shared_key_length) {
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh.slice(), eph_pk, server_kp.secret_key.constSlice());
         var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
@@ -464,7 +446,7 @@ pub const Suite = struct {
         encapsulated_secret: EncapsulatedSecret,
     };
 
-    pub fn createClientContext(suite: *Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !ClientContextAndEncapsulatedSecret {
+    pub fn createClientContext(suite: Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !ClientContextAndEncapsulatedSecret {
         const encapsulated_secret = try suite.encap(server_pk, seed);
         const mode: Mode = if (psk) |_| .psk else .base;
         const inner_ctx = try suite.keySchedule(mode, encapsulated_secret.secret.constSlice(), info, psk);
@@ -475,7 +457,7 @@ pub const Suite = struct {
         };
     }
 
-    pub fn createServerContext(suite: *Suite, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
+    pub fn createServerContext(suite: Suite, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
         const dh_secret = try suite.decap(encapsulated_secret, server_kp);
         const mode: Mode = if (psk) |_| .psk else .base;
         const inner_ctx = try suite.keySchedule(mode, dh_secret.constSlice(), info, psk);
@@ -484,7 +466,7 @@ pub const Suite = struct {
 };
 
 const Context = struct {
-    suite: *Suite,
+    suite: Suite,
     exporter_secret: FixedSlice(u8, max_prk_length),
     outbound_state: ?primitives.Aead.State,
 
