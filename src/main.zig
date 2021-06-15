@@ -318,7 +318,7 @@ pub const Suite = struct {
     pub fn labeledExtract(suite: *Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
         var buffer: [hpke_version.len + max_suite_id_length + max_label_length + max_ikm_length]u8 = undefined;
         var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-        var secret = ArrayList(u8).init(&alloc.allocator);
+        var secret = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
         try secret.appendSlice(&hpke_version);
         try secret.appendSlice(suite_id);
         try secret.appendSlice(label);
@@ -334,7 +334,7 @@ pub const Suite = struct {
         mem.writeIntBig(u16, &out_length, @intCast(u16, out.len));
         var buffer: [out_length.len + hpke_version.len + max_suite_id_length + max_label_length + max_info_length]u8 = undefined;
         var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-        var labeled_info = ArrayList(u8).init(&alloc.allocator);
+        var labeled_info = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
         defer labeled_info.deinit();
         try labeled_info.appendSlice(&out_length);
         try labeled_info.appendSlice(&hpke_version);
@@ -365,7 +365,7 @@ pub const Suite = struct {
 
         var buffer: [1 + max_prk_length + max_prk_length]u8 = undefined;
         var alloc = std.heap.FixedBufferAllocator.init(&buffer);
-        var key_schedule_ctx = ArrayList(u8).init(&alloc.allocator);
+        var key_schedule_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
         try key_schedule_ctx.append(@enumToInt(mode));
         try key_schedule_ctx.appendSlice(psk_id_hash.const_slice());
         try key_schedule_ctx.appendSlice(info_hash.const_slice());
@@ -405,10 +405,11 @@ pub const Suite = struct {
         var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair();
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh.slice(), server_pk, eph_kp.secret_key.slice());
-        var kem_ctx = try std.ArrayList(u8).initCapacity(&suite.arena.allocator, eph_kp.public_key.len + server_pk.len);
-        defer kem_ctx.deinit();
-        kem_ctx.appendSliceAssumeCapacity(eph_kp.public_key.slice());
-        kem_ctx.appendSliceAssumeCapacity(server_pk);
+        var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
+        var alloc = std.heap.FixedBufferAllocator.init(&buffer);
+        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        try kem_ctx.appendSlice(eph_kp.public_key.slice());
+        try kem_ctx.appendSlice(server_pk);
         const dh_secret = try suite.extractAndExpandDh(dh.const_slice(), kem_ctx.items);
         return EncapsulatedSecret{
             .secret = dh_secret,
