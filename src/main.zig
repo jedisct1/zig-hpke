@@ -49,17 +49,18 @@ const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 
 pub const Mode = enum(u8) { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
 
-const max_public_key_length: usize = 32;
-const max_secret_key_length: usize = 32;
-const max_shared_key_length: usize = 32;
-const max_prk_length: usize = 32;
-const max_label_length: usize = 64;
-const max_info_length: usize = 64;
-const max_suite_id_length: usize = 10;
-const max_digest_length: usize = 32;
-const max_ikm_length: usize = 64;
-const max_aead_key_length: usize = 32;
-const max_aead_nonce_length: usize = 12;
+pub const max_public_key_length: usize = 32;
+pub const max_secret_key_length: usize = 32;
+pub const max_shared_key_length: usize = 32;
+pub const max_prk_length: usize = 32;
+pub const max_label_length: usize = 64;
+pub const max_info_length: usize = 64;
+pub const max_suite_id_length: usize = 10;
+pub const max_digest_length: usize = 32;
+pub const max_ikm_length: usize = 64;
+pub const max_aead_key_length: usize = 32;
+pub const max_aead_nonce_length: usize = 12;
+pub const max_aead_tag_length: usize = 16;
 
 pub const primitives = struct {
     pub const Kem = struct {
@@ -177,6 +178,31 @@ pub const primitives = struct {
             key: FixedSlice(u8, max_aead_key_length),
             encryptFn: fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
             decryptFn: fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
+
+            fn incrementCounter(counter: []u8) void {
+                var i = counter.len;
+                var carry: u1 = 1;
+                var x: u8 = undefined;
+                while (true) {
+                    i -= 1;
+                    carry = @boolToInt(@addWithOverflow(u8, counter[i], carry, &x));
+                    counter[i] = x;
+                    if (i == 0) break;
+                }
+                debug.assert(carry == 0); // Counter overflow
+            }
+
+            pub fn nextNonce(state: *State) FixedSlice(u8, max_aead_nonce_length) {
+                debug.assert(state.counter.len == state.base_nonce.len);
+                var base_nonce = state.base_nonce.clone();
+                var nonce = base_nonce.slice();
+                var counter = state.counter.slice();
+                for (nonce) |*p, i| {
+                    p.* ^= counter[i];
+                }
+                incrementCounter(counter);
+                return FixedSlice(u8, max_aead_nonce_length).fromSlice(nonce) catch unreachable;
+            }
         };
 
         pub const Aes128Gcm = struct {
@@ -424,7 +450,7 @@ pub const Suite = struct {
 
     pub fn decap(suite: *Suite, eph_pk: []const u8, server_kp: KeyPair) !FixedSlice(u8, max_shared_key_length) {
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh.slice(), server_pk, eph_kp.secret_key.slice());
+        try suite.kem.dhFn(dh.slice(), eph_pk, server_kp.secret_key.constSlice());
         var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
@@ -433,20 +459,27 @@ pub const Suite = struct {
         return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
     }
 
-    pub const Client = struct {
+    pub const ClientContextAndEncapsulatedSecret = struct {
         client_ctx: ClientContext,
         encapsulated_secret: EncapsulatedSecret,
     };
 
-    pub fn createClientDeterministicContext(suite: *Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !Client {
+    pub fn createClientContext(suite: *Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !ClientContextAndEncapsulatedSecret {
         const encapsulated_secret = try suite.encap(server_pk, seed);
         const mode: Mode = if (psk) |_| .psk else .base;
         const inner_ctx = try suite.keySchedule(mode, encapsulated_secret.secret.constSlice(), info, psk);
         const client_ctx = ClientContext{ .ctx = inner_ctx };
-        return Client{
+        return ClientContextAndEncapsulatedSecret{
             .client_ctx = client_ctx,
             .encapsulated_secret = encapsulated_secret,
         };
+    }
+
+    pub fn createServerContext(suite: *Suite, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
+        const dh_secret = try suite.decap(encapsulated_secret, server_kp);
+        const mode: Mode = if (psk) |_| .psk else .base;
+        const inner_ctx = try suite.keySchedule(mode, dh_secret.constSlice(), info, psk);
+        return ServerContext{ .ctx = inner_ctx };
     }
 };
 
@@ -454,13 +487,51 @@ const Context = struct {
     suite: *Suite,
     exporter_secret: FixedSlice(u8, max_prk_length),
     outbound_state: ?primitives.Aead.State,
+
+    fn exportSecret(ctx: Context, out: []u8, exporter_context: []const u8) !void {
+        try ctx.suite.labeledExpand(out, &ctx.suite.id.context, ctx.exporter_secret, "sec", exporter_context);
+    }
 };
 
 pub const ClientContext = struct {
     ctx: Context,
+
+    pub fn encryptToServer(client_context: *ClientContext, ciphertext: []u8, message: []const u8, ad: []const u8) void {
+        const required_ciphertext_length = client_context.ctx.suite.aead.?.tag_length + message.len;
+        debug.assert(ciphertext.len == required_ciphertext_length);
+        var state = &client_context.ctx.outbound_state.?;
+        const nonce = state.nextNonce();
+        state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
+    }
+
+    pub fn exporterSecret(client_context: ClientContext) FixedSlice(u8, max_prk_length) {
+        return client_context.ctx.exporter_secret;
+    }
+
+    pub fn exportSecret(client_context: ClientContext, out: []u8, context: []const u8) !void {
+        try client_context.ctx.exportSecret(out, context);
+    }
 };
 
-pub const ServerContext = struct { ctx: Context };
+pub const ServerContext = struct {
+    ctx: Context,
+
+    pub fn decryptFromClient(server_context: *ServerContext, message: []u8, ciphertext: []const u8, ad: []const u8) !void {
+        const required_ciphertext_length = server_context.ctx.suite.aead.?.tag_length + message.len;
+        debug.assert(ciphertext.len == required_ciphertext_length);
+        var state = &server_context.ctx.outbound_state.?;
+        const nonce = state.nextNonce();
+        try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
+    }
+
+    pub fn exporterSecret(server_context: ServerContext) FixedSlice(u8, max_prk_length) {
+        return server_context.ctx.exporter_secret;
+    }
+
+    pub fn exportSecret(server_context: ServerContext, out: []u8, context: []const u8) !void {
+        try server_context.ctx.exportSecret(out, context);
+    }
+};
 
 pub fn main() anyerror!void {
     var suite = try Suite.init(
@@ -489,10 +560,43 @@ pub fn main() anyerror!void {
     _ = try fmt.hexToBytes(&client_seed, client_seed_hex);
     var client_kp = try suite.deterministicKeyPair(&client_seed);
 
-    const client = try suite.createClientDeterministicContext(server_kp.public_key.slice(), &info, null, &client_seed);
+    var client_ctx_and_encapsulated_secret = try suite.createClientContext(server_kp.public_key.slice(), &info, null, &client_seed);
+    const encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
     _ = try fmt.hexToBytes(&expected, "e7d9aa41faa0481c005d1343b26939c0748a5f6bf1f81fbd1a4e924bf0719149");
-    debug.assert(mem.eql(u8, &expected, client.encapsulated_secret.encapsulated.constSlice()));
+    debug.assert(mem.eql(u8, &expected, encapsulated_secret.encapsulated.constSlice()));
 
+    var client_ctx = client_ctx_and_encapsulated_secret.client_ctx;
     _ = try fmt.hexToBytes(&expected, "d27ca8c6ce9d8998f3692613c29e5ae0b064234b874a52d65a014eeffed429b9");
-    debug.assert(mem.eql(u8, &expected, client.client_ctx.ctx.exporter_secret.constSlice()));
+    debug.assert(mem.eql(u8, &expected, client_ctx.exporterSecret().constSlice()));
+
+    var server_ctx = try suite.createServerContext(encapsulated_secret.encapsulated.constSlice(), server_kp, &info, null);
+
+    const message = "message";
+    const ad = "ad";
+    var ciphertext: [max_aead_tag_length + message.len]u8 = undefined;
+    client_ctx.encryptToServer(&ciphertext, message, ad);
+    _ = try fmt.hexToBytes(&expected, "dc54a1124854e041089e52066349a238380aaf6bf98a4c");
+    debug.assert(mem.eql(u8, expected[0..ciphertext.len], &ciphertext));
+
+    var message2: [message.len]u8 = undefined;
+    try server_ctx.decryptFromClient(&message2, &ciphertext, ad);
+    debug.assert(mem.eql(u8, message[0..], message2[0..]));
+
+    client_ctx.encryptToServer(&ciphertext, message, ad);
+    _ = try fmt.hexToBytes(&expected, "37fbdf5f21e77f15291212fe94579054f56eaf5e78f2b5");
+    debug.assert(mem.eql(u8, expected[0..ciphertext.len], &ciphertext));
+
+    try server_ctx.decryptFromClient(&message2, &ciphertext, ad);
+    debug.assert(mem.eql(u8, message[0..], message2[0..]));
+
+    _ = try fmt.hexToBytes(&expected, "ede5198c19b2591389fc7cea");
+    const base_nonce = client_ctx.ctx.outbound_state.?.base_nonce.constSlice();
+    debug.assert(mem.eql(u8, base_nonce, expected[0..base_nonce.len]));
+
+    var exported_secret: [expected.len]u8 = undefined;
+    _ = try fmt.hexToBytes(&expected, "4ab2fe1958f433ebdd2e6302a81a5a7ca91f2ecf2188658524d681be7a9f8e45");
+    try client_ctx.exportSecret(&exported_secret, "exported secret");
+    debug.assert(mem.eql(u8, &expected, &exported_secret));
+    try server_ctx.exportSecret(&exported_secret, "exported secret");
+    debug.assert(mem.eql(u8, &expected, &exported_secret));
 }
