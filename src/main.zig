@@ -170,14 +170,13 @@ pub const primitives = struct {
         nonce_length: usize,
         tag_length: usize,
         newStateFn: fn (key: []const u8, base_nonce: []const u8) error{ InvalidParameters, SliceTooBig }!State,
-        encryptFn: fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
-        decryptFn: fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
 
         pub const State = struct {
-            aead: Aead,
             base_nonce: FixedSlice(u8, max_aead_nonce_length),
             counter: FixedSlice(u8, max_aead_nonce_length),
             key: FixedSlice(u8, max_aead_key_length),
+            encryptFn: fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
+            decryptFn: fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
         };
 
         pub const Aes128Gcm = struct {
@@ -191,10 +190,11 @@ pub const primitives = struct {
                 var counter = try FixedSlice(u8, max_aead_nonce_length).init(A.nonce_length);
                 mem.set(u8, counter.slice(), 0);
                 var state = State{
-                    .aead = @This().aead,
                     .base_nonce = try FixedSlice(u8, max_aead_nonce_length).fromSlice(base_nonce),
                     .counter = counter,
                     .key = try FixedSlice(u8, max_aead_key_length).fromSlice(key),
+                    .encryptFn = encrypt,
+                    .decryptFn = decrypt,
                 };
                 return state;
             }
@@ -213,8 +213,6 @@ pub const primitives = struct {
                 .nonce_length = A.nonce_length,
                 .tag_length = A.tag_length,
                 .newStateFn = newState,
-                .encryptFn = encrypt,
-                .decryptFn = decrypt,
             };
         };
 
@@ -370,18 +368,18 @@ pub const Suite = struct {
         var exporter_secret = try FixedSlice(u8, max_prk_length).init(suite.kdf.prk_length);
         try suite.labeledExpand(exporter_secret.slice(), &suite.id.context, secret, "exp", key_schedule_ctx.items);
 
-        var outbound_state: ?primitives.Aead.State = if (suite.aead) |aead| blk: {
+        var outbound_state = if (suite.aead) |aead| blk: {
             var outbound_key = try FixedSlice(u8, max_aead_key_length).init(aead.key_length);
             try suite.labeledExpand(outbound_key.slice(), &suite.id.context, secret, "key", key_schedule_ctx.items);
             var outbound_base_nonce = try FixedSlice(u8, max_aead_nonce_length).init(aead.nonce_length);
             try suite.labeledExpand(outbound_base_nonce.slice(), &suite.id.context, secret, "base_nonce", key_schedule_ctx.items);
-            var outbound_state = try aead.newStateFn(outbound_key.constSlice(), outbound_base_nonce.constSlice());
-            break :blk null;
+            break :blk try aead.newStateFn(outbound_key.constSlice(), outbound_base_nonce.constSlice());
         } else null;
 
         return Context{
             .suite = suite,
             .exporter_secret = exporter_secret,
+            .outbound_state = outbound_state,
         };
     }
 
@@ -396,9 +394,9 @@ pub const Suite = struct {
         return suite.kem.deterministicKeyPairFn(secret_key.constSlice());
     }
 
-    fn extractAndExpandDh(suite: *Suite, dh: []const u8, kem_ctx: []const u8) !FixedSlice(u8, max_digest_length) {
+    fn extractAndExpandDh(suite: *Suite, dh: []const u8, kem_ctx: []const u8) !FixedSlice(u8, max_shared_key_length) {
         const prk = try suite.labeledExtract(&suite.id.kem, null, "eae_prk", dh);
-        var dh_secret = try FixedSlice(u8, max_digest_length).init(suite.kem.digest_length);
+        var dh_secret = try FixedSlice(u8, max_digest_length).init(suite.kem.shared_length);
         try suite.labeledExpand(dh_secret.slice(), &suite.id.kem, prk, "shared_secret", kem_ctx);
         return dh_secret;
     }
@@ -424,6 +422,17 @@ pub const Suite = struct {
         };
     }
 
+    pub fn decap(suite: *Suite, eph_pk: []const u8, server_kp: KeyPair) !FixedSlice(u8, max_shared_key_length) {
+        var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
+        try suite.kem.dhFn(dh.slice(), server_pk, eph_kp.secret_key.slice());
+        var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
+        var alloc = FixedBufferAllocator.init(&buffer);
+        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        try kem_ctx.appendSlice(eph_pk);
+        try kem_ctx.appendSlice(server_kp.public_key.constSlice());
+        return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
+    }
+
     pub const Client = struct {
         client_ctx: ClientContext,
         encapsulated_secret: EncapsulatedSecret,
@@ -444,6 +453,7 @@ pub const Suite = struct {
 const Context = struct {
     suite: *Suite,
     exporter_secret: FixedSlice(u8, max_prk_length),
+    outbound_state: ?primitives.Aead.State,
 };
 
 pub const ClientContext = struct {
