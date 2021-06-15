@@ -11,7 +11,7 @@ fn FixedSlice(comptime T: type, comptime max_len: usize) type {
     return struct {
         const Self = @This();
         buffer: [max_len]T,
-        len: usize,
+        len: usize = 0,
 
         pub fn init(len: usize) !Self {
             if (len > max_len) return error.SliceTooBig;
@@ -33,14 +33,14 @@ fn FixedSlice(comptime T: type, comptime max_len: usize) type {
             return self.slice;
         }
 
-        pub fn dupe(m: []const T) !Self {
+        pub fn fromSlice(m: []const T) !Self {
             var fixed_slice = try init(m.len);
             mem.copy(T, fixed_slice.slice(), m);
             return fixed_slice;
         }
 
         pub fn clone(self: Self) Self {
-            return dupe(self.constSlice()) catch unreachable;
+            return fromSlice(self.constSlice()) catch unreachable;
         }
     };
 }
@@ -81,8 +81,8 @@ pub const primitives = struct {
             fn generateKeyPair() !KeyPair {
                 const kp = try crypto.dh.X25519.KeyPair.create(null);
                 return KeyPair{
-                    .public_key = try FixedSlice(u8, max_public_key_length).dupe(&kp.public_key),
-                    .secret_key = try FixedSlice(u8, max_secret_key_length).dupe(&kp.secret_key),
+                    .public_key = try FixedSlice(u8, max_public_key_length).fromSlice(&kp.public_key),
+                    .secret_key = try FixedSlice(u8, max_secret_key_length).fromSlice(&kp.secret_key),
                 };
             }
 
@@ -90,8 +90,8 @@ pub const primitives = struct {
                 debug.assert(secret_key.len == secret_length);
                 const public_key = try crypto.dh.X25519.recoverPublicKey(secret_key[0..secret_length].*);
                 return KeyPair{
-                    .public_key = try FixedSlice(u8, max_public_key_length).dupe(&public_key),
-                    .secret_key = try FixedSlice(u8, max_secret_key_length).dupe(secret_key),
+                    .public_key = try FixedSlice(u8, max_public_key_length).fromSlice(&public_key),
+                    .secret_key = try FixedSlice(u8, max_secret_key_length).fromSlice(secret_key),
                 };
             }
 
