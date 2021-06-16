@@ -30,7 +30,7 @@ fn FixedSlice(comptime T: type, comptime max_len: usize) type {
         pub fn resize(self: *Self, len: usize) ![]T {
             if (len > max_len) return error.SliceTooBig;
             self.len = len;
-            return self.slice;
+            return self.slice();
         }
 
         pub fn fromSlice(m: []const T) !Self {
