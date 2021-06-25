@@ -49,20 +49,34 @@ const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 
 pub const Mode = enum(u8) { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
 
+/// Maximum length of a public key in bytes
 pub const max_public_key_length: usize = 32;
+/// Maximum length of a secret key in bytes
 pub const max_secret_key_length: usize = 32;
+/// Maximum length of a shared key in bytes
 pub const max_shared_key_length: usize = 32;
+/// Maximum length of a PRK in bytes
 pub const max_prk_length: usize = 32;
+/// Maximum length of a label in bytes
 pub const max_label_length: usize = 64;
+/// Maximum length of an info string in bytes
 pub const max_info_length: usize = 64;
+/// Maximum length of a suite ID
 pub const max_suite_id_length: usize = 10;
+/// Maximum length of a hash function
 pub const max_digest_length: usize = 32;
+/// Maximum length of input keying material
 pub const max_ikm_length: usize = 64;
+/// Maximum length of an AEAD key
 pub const max_aead_key_length: usize = 32;
+/// Maximum length of an AEAD nonce
 pub const max_aead_nonce_length: usize = 12;
+/// Maximum length of an AEAD tag
 pub const max_aead_tag_length: usize = 16;
 
+/// HPKE primitives
 pub const primitives = struct {
+    /// Key exchange mechanisms
     pub const Kem = struct {
         id: u16,
         secret_length: usize,
@@ -73,6 +87,7 @@ pub const primitives = struct {
         deterministicKeyPairFn: fn (secret_key: []const u8) anyerror!KeyPair,
         dhFn: fn (out: []u8, pk: []const u8, sk: []const u8) anyerror!void,
 
+        /// X25519-HKDF-SHA256
         pub const X25519HkdfSha256 = struct {
             const H = crypto.hash.sha2.Sha256;
             const K = crypto.kdf.hkdf.HkdfSha256;
@@ -118,6 +133,7 @@ pub const primitives = struct {
             };
         };
 
+        /// Return a suite given a suite ID
         pub fn fromId(id: u16) !Kem {
             return switch (id) {
                 X25519HkdfSha256.id => X25519HkdfSha256.kem,
@@ -126,12 +142,14 @@ pub const primitives = struct {
         }
     };
 
+    /// Key derivation functions
     pub const Kdf = struct {
         id: u16,
         prk_length: usize,
         extract: fn (out: []u8, salt: []const u8, ikm: []const u8) void,
         expand: fn (out: []u8, ctx: []const u8, prk: []const u8) void,
 
+        /// HKDF-SHA-256
         pub const HkdfSha256 = struct {
             const M = crypto.auth.hmac.sha2.HmacSha256;
             const F = crypto.kdf.hkdf.Hkdf(M);
@@ -157,6 +175,7 @@ pub const primitives = struct {
             };
         };
 
+        /// Return a KDF from a KDF id
         pub fn fromId(id: u16) !Kdf {
             return switch (id) {
                 HkdfSha256.id => HkdfSha256.kdf,
@@ -165,6 +184,7 @@ pub const primitives = struct {
         }
     };
 
+    /// AEADs
     pub const Aead = struct {
         id: u16,
         key_length: usize,
@@ -172,6 +192,7 @@ pub const primitives = struct {
         tag_length: usize,
         newStateFn: fn (key: []const u8, base_nonce: []const u8) error{ InvalidParameters, SliceTooBig }!State,
 
+        /// An AEAD state
         pub const State = struct {
             base_nonce: FixedSlice(u8, max_aead_nonce_length),
             counter: FixedSlice(u8, max_aead_nonce_length),
@@ -192,6 +213,7 @@ pub const primitives = struct {
                 debug.assert(carry == 0); // Counter overflow
             }
 
+            /// Increment the nonce
             pub fn nextNonce(state: *State) FixedSlice(u8, max_aead_nonce_length) {
                 debug.assert(state.counter.len == state.base_nonce.len);
                 var base_nonce = state.base_nonce.clone();
@@ -205,6 +227,7 @@ pub const primitives = struct {
             }
         };
 
+        /// AES-128-GCM
         pub const Aes128Gcm = struct {
             const A = crypto.aead.aes_gcm.Aes128Gcm;
             pub const id: u16 = 0x0001;
@@ -242,10 +265,12 @@ pub const primitives = struct {
             };
         };
 
+        /// Use an external AEAD
         pub const ExportOnly = struct {
             pub const id: u16 = 0xffff;
         };
 
+        /// Return an AEAD given an ID
         pub fn fromId(id: u16) !?Aead {
             return switch (id) {
                 Aes128Gcm.id => Aes128Gcm.aead,
@@ -256,16 +281,19 @@ pub const primitives = struct {
     };
 };
 
+/// A pre-shared key
 pub const Psk = struct {
     key: []u8,
     id: []u8,
 };
 
+/// A key pair
 pub const KeyPair = struct {
     public_key: FixedSlice(u8, max_public_key_length),
     secret_key: FixedSlice(u8, max_secret_key_length),
 };
 
+/// An HPKE suite
 pub const Suite = struct {
     id: struct {
         context: [10]u8,
@@ -289,6 +317,7 @@ pub const Suite = struct {
         return id;
     }
 
+    /// Create an HPKE suite given its components identifiers
     pub fn init(kem_id: u16, kdf_id: u16, aead_id: u16) !Suite {
         const kem = switch (kem_id) {
             primitives.Kem.X25519HkdfSha256.id => primitives.Kem.X25519HkdfSha256.kem,
@@ -307,18 +336,21 @@ pub const Suite = struct {
         };
     }
 
+    /// Extract a PRK out of input keying material and an optional salt
     pub fn extract(suite: Suite, prk: []u8, salt: ?[]const u8, ikm: []const u8) void {
         const prk_length = suite.kdf.prk_length;
         debug.assert(prk.len == prk_length);
         suite.kdf.extract(prk, salt orelse "", ikm);
     }
 
+    /// Expand a PRK into an arbitrary-long key for the context `ctx`
     pub fn expand(suite: Suite, out: []u8, ctx: []const u8, prk: []const u8) void {
         suite.kdf.expand(out, ctx, prk);
     }
 
     pub const Prk = FixedSlice(u8, max_prk_length);
 
+    /// Create a PRK given a suite ID, a label, input keying material and an optional salt
     pub fn labeledExtract(suite: Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
         var buffer: [hpke_version.len + max_suite_id_length + max_label_length + max_ikm_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
@@ -333,6 +365,7 @@ pub const Suite = struct {
         return prk;
     }
 
+    /// Expand a PRK using a suite, a label and optional information
     pub fn labeledExpand(suite: Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
         var out_length = [_]u8{ 0, 0 };
         mem.writeIntBig(u16, &out_length, @intCast(u16, out.len));
@@ -391,10 +424,12 @@ pub const Suite = struct {
         };
     }
 
+    /// Create a new key pair
     pub fn generateKeyPair(suite: Suite) !KeyPair {
         return suite.kem.generateKeyPairFn();
     }
 
+    /// Create a new deterministic key pair
     pub fn deterministicKeyPair(suite: Suite, seed: []const u8) !KeyPair {
         var prk = try suite.labeledExtract(&suite.id.kem, null, "dkp_prk", seed);
         var secret_key = try FixedSlice(u8, max_secret_key_length).init(suite.kem.secret_length);
@@ -409,11 +444,13 @@ pub const Suite = struct {
         return dh_secret;
     }
 
+    /// A secret, and an encapsulated (encrypted) representation of it
     pub const EncapsulatedSecret = struct {
         secret: FixedSlice(u8, max_digest_length),
         encapsulated: FixedSlice(u8, max_public_key_length),
     };
 
+    /// Generate a secret, return it as well as its encapsulation
     pub fn encap(suite: Suite, server_pk: []const u8, seed: ?[]const u8) !EncapsulatedSecret {
         var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair();
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
@@ -430,6 +467,7 @@ pub const Suite = struct {
         };
     }
 
+    /// Generate a secret, return it as well as its encapsulation, with authentication support
     pub fn authEncap(suite: Suite, server_pk: []const u8, client_kp: KeyPair, seed: ?[]const u8) !EncapsulatedSecret {
         var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair();
         var dh1 = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
@@ -452,6 +490,7 @@ pub const Suite = struct {
         };
     }
 
+    /// Decapsulate a secret
     pub fn decap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair) !FixedSlice(u8, max_shared_key_length) {
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh.slice(), eph_pk, server_kp.secret_key.constSlice());
@@ -463,6 +502,7 @@ pub const Suite = struct {
         return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
     }
 
+    /// Authenticate a client using its public key and decapsulate a secret
     pub fn authDecap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair, client_pk: []const u8) !FixedSlice(u8, max_shared_key_length) {
         var dh1 = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh1.slice(), eph_pk, server_kp.secret_key.constSlice());
@@ -480,11 +520,13 @@ pub const Suite = struct {
         return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
     }
 
+    /// A client context as well as an encapsulated secret
     pub const ClientContextAndEncapsulatedSecret = struct {
         client_ctx: ClientContext,
         encapsulated_secret: EncapsulatedSecret,
     };
 
+    /// Create a new client context
     pub fn createClientContext(suite: Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !ClientContextAndEncapsulatedSecret {
         const encapsulated_secret = try suite.encap(server_pk, seed);
         const mode: Mode = if (psk) |_| .psk else .base;
@@ -496,6 +538,7 @@ pub const Suite = struct {
         };
     }
 
+    /// Create a new client authenticated context
     pub fn createAuthenticatedClientContext(suite: Suite, client_kp: KeyPair, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !ClientContextAndEncapsulatedSecret {
         const encapsulated_secret = try suite.authEncap(server_pk, client_kp, seed);
         const mode: Mode = if (psk) |_| .authPsk else .auth;
@@ -507,6 +550,7 @@ pub const Suite = struct {
         };
     }
 
+    /// Create a new server context
     pub fn createServerContext(suite: Suite, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
         const dh_secret = try suite.decap(encapsulated_secret, server_kp);
         const mode: Mode = if (psk) |_| .psk else .base;
@@ -514,6 +558,7 @@ pub const Suite = struct {
         return ServerContext{ .ctx = inner_ctx };
     }
 
+    /// Create a new authenticated server context
     pub fn createAuthenticatedServerContext(suite: Suite, client_pk: []const u8, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
         const dh_secret = try suite.authDecap(encapsulated_secret, server_kp, client_pk);
         const mode: Mode = if (psk) |_| .authPsk else .auth;
@@ -541,9 +586,11 @@ const Context = struct {
     }
 };
 
+/// A client context
 pub const ClientContext = struct {
     ctx: Context,
 
+    /// Encrypt a message for the server
     pub fn encryptToServer(client_context: *ClientContext, ciphertext: []u8, message: []const u8, ad: []const u8) void {
         const required_ciphertext_length = client_context.ctx.suite.aead.?.tag_length + message.len;
         debug.assert(ciphertext.len == required_ciphertext_length);
@@ -552,6 +599,7 @@ pub const ClientContext = struct {
         state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
     }
 
+    /// Decrypt a response from the server
     pub fn decryptFromServer(client_context: *ClientContext, message: []u8, ciphertext: []const u8, ad: []const u8) !void {
         if (client_context.ctx.inbound_state == null) {
             client_context.ctx.inbound_state = client_context.ctx.responseState() catch unreachable;
@@ -563,18 +611,22 @@ pub const ClientContext = struct {
         try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
     }
 
+    /// Return the exporter secret
     pub fn exporterSecret(client_context: ClientContext) FixedSlice(u8, max_prk_length) {
         return client_context.ctx.exporter_secret;
     }
 
-    pub fn exportSecret(client_context: ClientContext, out: []u8, context: []const u8) !void {
-        try client_context.ctx.exportSecret(out, context);
+    /// Derive an arbitrary-long secret
+    pub fn exportSecret(client_context: ClientContext, out: []u8, info: []const u8) !void {
+        try client_context.ctx.exportSecret(out, info);
     }
 };
 
+/// A server context
 pub const ServerContext = struct {
     ctx: Context,
 
+    /// Decrypt a ciphertext received from the client
     pub fn decryptFromClient(server_context: *ServerContext, message: []u8, ciphertext: []const u8, ad: []const u8) !void {
         const required_ciphertext_length = server_context.ctx.suite.aead.?.tag_length + message.len;
         debug.assert(ciphertext.len == required_ciphertext_length);
@@ -583,6 +635,7 @@ pub const ServerContext = struct {
         try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
     }
 
+    /// Encrypt a response to the client
     pub fn encryptToClient(server_context: *ServerContext, ciphertext: []u8, message: []const u8, ad: []const u8) void {
         if (server_context.ctx.inbound_state == null) {
             server_context.ctx.inbound_state = server_context.ctx.responseState() catch unreachable;
@@ -594,12 +647,14 @@ pub const ServerContext = struct {
         state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
     }
 
+    /// Return the exporter secret
     pub fn exporterSecret(server_context: ServerContext) FixedSlice(u8, max_prk_length) {
         return server_context.ctx.exporter_secret;
     }
 
-    pub fn exportSecret(server_context: ServerContext, out: []u8, context: []const u8) !void {
-        try server_context.ctx.exportSecret(out, context);
+    /// Derive an arbitrary-long secret
+    pub fn exportSecret(server_context: ServerContext, out: []u8, info: []const u8) !void {
+        try server_context.ctx.exportSecret(out, info);
     }
 };
 
