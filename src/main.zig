@@ -9,6 +9,7 @@ const FixedSlice = @import("fixed_slice.zig").FixedSlice;
 
 const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 
+/// HPKE mode
 pub const Mode = enum(u8) { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
 
 /// Maximum length of a public key in bytes
