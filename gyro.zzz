@@ -1,0 +1,10 @@
+pkgs:
+  hpke:
+    version: 0.0.0
+    description: "HPKE for Zig"
+    source_url: "https://github.com/jedisct1/zig-hpke"
+
+    root: src/main.zig
+    files:
+      README.md
+      LICENSE
