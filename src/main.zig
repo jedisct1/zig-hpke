@@ -7,7 +7,7 @@ const meta = std.meta;
 const ArrayList = std.ArrayList;
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 
-fn FixedSlice(comptime T: type, comptime max_len: usize) type {
+pub fn FixedSlice(comptime T: type, comptime max_len: usize) type {
     return struct {
         const Self = @This();
         buffer: [max_len]T,
