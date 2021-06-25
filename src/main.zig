@@ -620,6 +620,11 @@ pub const ClientContext = struct {
     pub fn exportSecret(client_context: ClientContext, out: []u8, info: []const u8) !void {
         try client_context.ctx.exportSecret(out, info);
     }
+
+    /// Return the tag length
+    pub fn tagLength(server_context: ClientContext) usize {
+        return client_context.ctx.suite.aead.?.tag_length;
+    }
 };
 
 /// A server context
@@ -656,10 +661,15 @@ pub const ServerContext = struct {
     pub fn exportSecret(server_context: ServerContext, out: []u8, info: []const u8) !void {
         try server_context.ctx.exportSecret(out, info);
     }
+
+    /// Return the tag length
+    pub fn tagLength(server_context: ServerContext) usize {
+        return server_context.ctx.suite.aead.?.tag_length;
+    }
 };
 
 pub fn main() anyerror!void {
-    var suite = try Suite.init(
+    const suite = try Suite.init(
         primitives.Kem.X25519HkdfSha256.id,
         primitives.Kdf.HkdfSha256.id,
         primitives.Aead.Aes128Gcm.id,
