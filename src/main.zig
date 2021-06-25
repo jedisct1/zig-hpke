@@ -552,6 +552,17 @@ pub const ClientContext = struct {
         state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
     }
 
+    pub fn decryptFromServer(client_context: *ClientContext, message: []u8, ciphertext: []const u8, ad: []const u8) !void {
+        if (client_context.ctx.inbound_state == null) {
+            client_context.ctx.inbound_state = client_context.ctx.responseState() catch unreachable;
+        }
+        const required_ciphertext_length = client_context.ctx.suite.aead.?.tag_length + message.len;
+        debug.assert(ciphertext.len == required_ciphertext_length);
+        var state = &client_context.ctx.inbound_state.?;
+        const nonce = state.nextNonce();
+        try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
+    }
+
     pub fn exporterSecret(client_context: ClientContext) FixedSlice(u8, max_prk_length) {
         return client_context.ctx.exporter_secret;
     }
@@ -667,6 +678,8 @@ pub fn main() anyerror!void {
         null,
         null,
     );
+    encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
+    client_ctx = client_ctx_and_encapsulated_secret.client_ctx;
     server_ctx = try suite.createAuthenticatedServerContext(
         client_kp.public_key.constSlice(),
         encapsulated_secret.encapsulated.constSlice(),
@@ -674,12 +687,11 @@ pub fn main() anyerror!void {
         &info,
         null,
     );
-    encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
-    client_ctx = client_ctx_and_encapsulated_secret.client_ctx;
-
     client_ctx.encryptToServer(&ciphertext, message, ad);
     try server_ctx.decryptFromClient(&message2, &ciphertext, ad);
     debug.assert(mem.eql(u8, message[0..], message2[0..]));
 
     server_ctx.encryptToClient(&ciphertext, message, ad);
+    try client_ctx.decryptFromServer(&message2, &ciphertext, ad);
+    debug.assert(mem.eql(u8, message[0..], message2[0..]));
 }
