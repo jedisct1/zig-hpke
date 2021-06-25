@@ -355,7 +355,7 @@ pub const Suite = struct {
             if (mode == .base or mode == .auth) {
                 return error.PskNotRequired;
             }
-        } else if (mode == .auth or mode == .authPsk) {
+        } else if (mode == .psk or mode == .authPsk) {
             return error.PskRequired;
         }
     }
@@ -421,8 +421,30 @@ pub const Suite = struct {
         var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
-        try kem_ctx.appendSlice(eph_kp.public_key.slice());
+        try kem_ctx.appendSlice(eph_kp.public_key.constSlice());
         try kem_ctx.appendSlice(server_pk);
+        const dh_secret = try suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
+        return EncapsulatedSecret{
+            .secret = dh_secret,
+            .encapsulated = eph_kp.public_key,
+        };
+    }
+
+    pub fn authEncap(suite: Suite, server_pk: []const u8, client_kp: KeyPair, seed: ?[]const u8) !EncapsulatedSecret {
+        var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair();
+        var dh1 = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
+        try suite.kem.dhFn(dh1.slice(), server_pk, eph_kp.secret_key.constSlice());
+        var dh2 = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
+        try suite.kem.dhFn(dh2.slice(), server_pk, client_kp.secret_key.constSlice());
+        var dh = try FixedSlice(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
+        mem.copy(u8, dh.slice()[0..dh1.len], dh1.constSlice());
+        mem.copy(u8, dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
+        var buffer: [3 * max_public_key_length]u8 = undefined;
+        var alloc = FixedBufferAllocator.init(&buffer);
+        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        try kem_ctx.appendSlice(eph_kp.public_key.constSlice());
+        try kem_ctx.appendSlice(server_pk);
+        try kem_ctx.appendSlice(client_kp.public_key.constSlice());
         const dh_secret = try suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
         return EncapsulatedSecret{
             .secret = dh_secret,
@@ -433,11 +455,28 @@ pub const Suite = struct {
     pub fn decap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair) !FixedSlice(u8, max_shared_key_length) {
         var dh = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh.slice(), eph_pk, server_kp.secret_key.constSlice());
-        var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
+        var buffer: [2 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
         try kem_ctx.appendSlice(eph_pk);
         try kem_ctx.appendSlice(server_kp.public_key.constSlice());
+        return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
+    }
+
+    pub fn authDecap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair, client_pk: []const u8) !FixedSlice(u8, max_shared_key_length) {
+        var dh1 = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
+        try suite.kem.dhFn(dh1.slice(), eph_pk, server_kp.secret_key.constSlice());
+        var dh2 = try FixedSlice(u8, max_shared_key_length).init(suite.kem.shared_length);
+        try suite.kem.dhFn(dh2.slice(), client_pk, server_kp.secret_key.constSlice());
+        var dh = try FixedSlice(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
+        mem.copy(u8, dh.slice()[0..dh1.len], dh1.constSlice());
+        mem.copy(u8, dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
+        var buffer: [3 * max_public_key_length]u8 = undefined;
+        var alloc = FixedBufferAllocator.init(&buffer);
+        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        try kem_ctx.appendSlice(eph_pk);
+        try kem_ctx.appendSlice(server_kp.public_key.constSlice());
+        try kem_ctx.appendSlice(client_pk);
         return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
     }
 
@@ -457,9 +496,27 @@ pub const Suite = struct {
         };
     }
 
+    pub fn createAuthenticatedClientContext(suite: Suite, client_kp: KeyPair, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8) !ClientContextAndEncapsulatedSecret {
+        const encapsulated_secret = try suite.authEncap(server_pk, client_kp, seed);
+        const mode: Mode = if (psk) |_| .authPsk else .auth;
+        const inner_ctx = try suite.keySchedule(mode, encapsulated_secret.secret.constSlice(), info, psk);
+        const client_ctx = ClientContext{ .ctx = inner_ctx };
+        return ClientContextAndEncapsulatedSecret{
+            .client_ctx = client_ctx,
+            .encapsulated_secret = encapsulated_secret,
+        };
+    }
+
     pub fn createServerContext(suite: Suite, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
         const dh_secret = try suite.decap(encapsulated_secret, server_kp);
         const mode: Mode = if (psk) |_| .psk else .base;
+        const inner_ctx = try suite.keySchedule(mode, dh_secret.constSlice(), info, psk);
+        return ServerContext{ .ctx = inner_ctx };
+    }
+
+    pub fn createAuthenticatedServerContext(suite: Suite, client_pk: []const u8, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
+        const dh_secret = try suite.authDecap(encapsulated_secret, server_kp, client_pk);
+        const mode: Mode = if (psk) |_| .authPsk else .auth;
         const inner_ctx = try suite.keySchedule(mode, dh_secret.constSlice(), info, psk);
         return ServerContext{ .ctx = inner_ctx };
     }
@@ -468,10 +525,19 @@ pub const Suite = struct {
 const Context = struct {
     suite: Suite,
     exporter_secret: FixedSlice(u8, max_prk_length),
-    outbound_state: ?primitives.Aead.State,
+    inbound_state: ?primitives.Aead.State = null,
+    outbound_state: ?primitives.Aead.State = null,
 
     fn exportSecret(ctx: Context, out: []u8, exporter_context: []const u8) !void {
         try ctx.suite.labeledExpand(out, &ctx.suite.id.context, ctx.exporter_secret, "sec", exporter_context);
+    }
+
+    fn responseState(ctx: Context) !primitives.Aead.State {
+        var inbound_key = try FixedSlice(u8, max_aead_key_length).init(ctx.suite.aead.?.key_length);
+        var inbound_base_nonce = try FixedSlice(u8, max_aead_nonce_length).init(ctx.suite.aead.?.nonce_length);
+        try ctx.exportSecret(inbound_key.slice(), "response key");
+        try ctx.exportSecret(inbound_base_nonce.slice(), "response nonce");
+        return ctx.suite.aead.?.newStateFn(inbound_key.constSlice(), inbound_base_nonce.constSlice());
     }
 };
 
@@ -504,6 +570,17 @@ pub const ServerContext = struct {
         var state = &server_context.ctx.outbound_state.?;
         const nonce = state.nextNonce();
         try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
+    }
+
+    pub fn encryptToClient(server_context: *ServerContext, ciphertext: []u8, message: []const u8, ad: []const u8) void {
+        if (server_context.ctx.inbound_state == null) {
+            server_context.ctx.inbound_state = server_context.ctx.responseState() catch unreachable;
+        }
+        const required_ciphertext_length = server_context.ctx.suite.aead.?.tag_length + message.len;
+        debug.assert(ciphertext.len == required_ciphertext_length);
+        var state = &server_context.ctx.inbound_state.?;
+        const nonce = state.nextNonce();
+        state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
     }
 
     pub fn exporterSecret(server_context: ServerContext) FixedSlice(u8, max_prk_length) {
@@ -544,7 +621,7 @@ pub fn main() anyerror!void {
     _ = client_kp;
 
     var client_ctx_and_encapsulated_secret = try suite.createClientContext(server_kp.public_key.slice(), &info, null, &client_seed);
-    const encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
+    var encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
     _ = try fmt.hexToBytes(&expected, "e7d9aa41faa0481c005d1343b26939c0748a5f6bf1f81fbd1a4e924bf0719149");
     debug.assert(mem.eql(u8, &expected, encapsulated_secret.encapsulated.constSlice()));
 
@@ -582,4 +659,27 @@ pub fn main() anyerror!void {
     debug.assert(mem.eql(u8, &expected, &exported_secret));
     try server_ctx.exportSecret(&exported_secret, "exported secret");
     debug.assert(mem.eql(u8, &expected, &exported_secret));
+
+    client_ctx_and_encapsulated_secret = try suite.createAuthenticatedClientContext(
+        client_kp,
+        server_kp.public_key.constSlice(),
+        &info,
+        null,
+        null,
+    );
+    server_ctx = try suite.createAuthenticatedServerContext(
+        client_kp.public_key.constSlice(),
+        encapsulated_secret.encapsulated.constSlice(),
+        server_kp,
+        &info,
+        null,
+    );
+    encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
+    client_ctx = client_ctx_and_encapsulated_secret.client_ctx;
+
+    client_ctx.encryptToServer(&ciphertext, message, ad);
+    try server_ctx.decryptFromClient(&message2, &ciphertext, ad);
+    debug.assert(mem.eql(u8, message[0..], message2[0..]));
+
+    server_ctx.encryptToClient(&ciphertext, message, ad);
 }
