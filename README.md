@@ -4,9 +4,9 @@
 
 ## Usage
 
-### Fixed slices
+### Bounded arrays
 
-This code heavily relies on the `FixedSlice` type: a type to store small, variable-sized slices whose maximum size is known.
+This code heavily relies on the `std.BoundedArray` type: a type to store small, variable-sized slices whose maximum size is known.
 
 Keys are typically represented using that type, whose raw slice can be accessed with the `constSlice()` function (for a constant slice), or `slice()` (for a mutable slice).
 
