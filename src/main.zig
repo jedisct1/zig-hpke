@@ -317,7 +317,7 @@ pub const Suite = struct {
     pub fn labeledExtract(suite: Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
         var buffer: [hpke_version.len + max_suite_id_length + max_label_length + max_ikm_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var secret = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var secret = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try secret.appendSlice(&hpke_version);
         try secret.appendSlice(suite_id);
         try secret.appendSlice(label);
@@ -334,7 +334,7 @@ pub const Suite = struct {
         mem.writeIntBig(u16, &out_length, @intCast(u16, out.len));
         var buffer: [out_length.len + hpke_version.len + max_suite_id_length + max_label_length + max_info_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var labeled_info = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var labeled_info = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try labeled_info.appendSlice(&out_length);
         try labeled_info.appendSlice(&hpke_version);
         try labeled_info.appendSlice(suite_id);
@@ -364,7 +364,7 @@ pub const Suite = struct {
 
         var buffer: [1 + max_prk_length + max_prk_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var key_schedule_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var key_schedule_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try key_schedule_ctx.append(@enumToInt(mode));
         try key_schedule_ctx.appendSlice(psk_id_hash.constSlice());
         try key_schedule_ctx.appendSlice(info_hash.constSlice());
@@ -420,7 +420,7 @@ pub const Suite = struct {
         try suite.kem.dhFn(dh.slice(), server_pk, eph_kp.secret_key.slice());
         var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try kem_ctx.appendSlice(eph_kp.public_key.constSlice());
         try kem_ctx.appendSlice(server_pk);
         const dh_secret = try suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
@@ -442,7 +442,7 @@ pub const Suite = struct {
         mem.copy(u8, dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
         var buffer: [3 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try kem_ctx.appendSlice(eph_kp.public_key.constSlice());
         try kem_ctx.appendSlice(server_pk);
         try kem_ctx.appendSlice(client_kp.public_key.constSlice());
@@ -459,7 +459,7 @@ pub const Suite = struct {
         try suite.kem.dhFn(dh.slice(), eph_pk, server_kp.secret_key.constSlice());
         var buffer: [2 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try kem_ctx.appendSlice(eph_pk);
         try kem_ctx.appendSlice(server_kp.public_key.constSlice());
         return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
@@ -476,7 +476,7 @@ pub const Suite = struct {
         mem.copy(u8, dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
         var buffer: [3 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(&alloc.allocator, alloc.buffer.len);
+        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
         try kem_ctx.appendSlice(eph_pk);
         try kem_ctx.appendSlice(server_kp.public_key.constSlice());
         try kem_ctx.appendSlice(client_pk);
