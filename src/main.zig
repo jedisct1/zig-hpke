@@ -368,7 +368,8 @@ pub const Suite = struct {
         try key_schedule_ctx.append(@enumToInt(mode));
         try key_schedule_ctx.appendSlice(psk_id_hash.constSlice());
         try key_schedule_ctx.appendSlice(info_hash.constSlice());
-        var secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_id);
+        const psk_key: []const u8 = if (psk) |p| p.key else &[_]u8{};
+        var secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_key);
         var exporter_secret = try BoundedArray(u8, max_prk_length).init(suite.kdf.prk_length);
         try suite.labeledExpand(exporter_secret.slice(), &suite.id.context, secret, "exp", key_schedule_ctx.items);
 
