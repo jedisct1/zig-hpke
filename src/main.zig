@@ -46,9 +46,9 @@ pub const primitives = struct {
         public_length: usize,
         shared_length: usize,
         digest_length: usize,
-        generateKeyPairFn: fn () anyerror!KeyPair,
-        deterministicKeyPairFn: fn (secret_key: []const u8) anyerror!KeyPair,
-        dhFn: fn (out: []u8, pk: []const u8, sk: []const u8) anyerror!void,
+        generateKeyPairFn: *const fn () anyerror!KeyPair,
+        deterministicKeyPairFn: *const fn (secret_key: []const u8) anyerror!KeyPair,
+        dhFn: *const fn (out: []u8, pk: []const u8, sk: []const u8) anyerror!void,
 
         /// X25519-HKDF-SHA256
         pub const X25519HkdfSha256 = struct {
@@ -109,8 +109,8 @@ pub const primitives = struct {
     pub const Kdf = struct {
         id: u16,
         prk_length: usize,
-        extract: fn (out: []u8, salt: []const u8, ikm: []const u8) void,
-        expand: fn (out: []u8, ctx: []const u8, prk: []const u8) void,
+        extract: *const fn (out: []u8, salt: []const u8, ikm: []const u8) void,
+        expand: *const fn (out: []u8, ctx: []const u8, prk: []const u8) void,
 
         /// HKDF-SHA-256
         pub const HkdfSha256 = struct {
@@ -153,24 +153,24 @@ pub const primitives = struct {
         key_length: usize,
         nonce_length: usize,
         tag_length: usize,
-        newStateFn: fn (key: []const u8, base_nonce: []const u8) error{ InvalidParameters, Overflow }!State,
+        newStateFn: *const fn (key: []const u8, base_nonce: []const u8) error{ InvalidParameters, Overflow }!State,
 
         /// An AEAD state
         pub const State = struct {
             base_nonce: BoundedArray(u8, max_aead_nonce_length),
             counter: BoundedArray(u8, max_aead_nonce_length),
             key: BoundedArray(u8, max_aead_key_length),
-            encryptFn: fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
-            decryptFn: fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
+            encryptFn: *const fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
+            decryptFn: *const fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
 
             fn incrementCounter(counter: []u8) void {
                 var i = counter.len;
                 var carry: u1 = 1;
-                var x: u8 = undefined;
                 while (true) {
                     i -= 1;
-                    carry = @boolToInt(@addWithOverflow(u8, counter[i], carry, &x));
-                    counter[i] = x;
+                    const res = @addWithOverflow(counter[i], carry);
+                    counter[i] = res[0];
+                    carry = res[1];
                     if (i == 0) break;
                 }
                 debug.assert(carry == 0); // Counter overflow
