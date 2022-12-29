@@ -21,9 +21,9 @@ pub const max_shared_key_length: usize = 32;
 /// Maximum length of a PRK in bytes
 pub const max_prk_length: usize = 32;
 /// Maximum length of a label in bytes
-pub const max_label_length: usize = 64;
+pub const max_label_length: usize = 128;
 /// Maximum length of an info string in bytes
-pub const max_info_length: usize = 64;
+pub const max_info_length: usize = 1024;
 /// Maximum length of a suite ID
 pub const max_suite_id_length: usize = 10;
 /// Maximum length of a hash function
