@@ -32,7 +32,6 @@ test "hpke" {
     var client_seed: [client_seed_hex.len / 2]u8 = undefined;
     _ = try fmt.hexToBytes(&client_seed, client_seed_hex);
     var client_kp = try suite.deterministicKeyPair(&client_seed);
-    _ = client_kp;
 
     var client_ctx_and_encapsulated_secret = try suite.createClientContext(server_kp.public_key.slice(), &info, null, &client_seed);
     var encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
