@@ -182,7 +182,7 @@ pub const primitives = struct {
                 var base_nonce = @TypeOf(state.base_nonce).fromSlice(state.base_nonce.constSlice()) catch unreachable;
                 var nonce = base_nonce.slice();
                 var counter = state.counter.slice();
-                for (nonce) |*p, i| {
+                for (nonce, 0..) |*p, i| {
                     p.* ^= counter[i];
                 }
                 incrementCounter(counter);
