@@ -1,6 +1,6 @@
 # HPKE for Zig
 
-`zig-hpke` is an implementation of the [Hybrid Public Key Encryption](https://cfrg.github.io/draft-irtf-cfrg-hpke/draft-irtf-cfrg-hpke.html) (HPKE) draft.
+`zig-hpke` is an implementation of the [Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html) (HPKE) scheme.
 
 ## Usage
 
