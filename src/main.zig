@@ -365,7 +365,7 @@ pub const Suite = struct {
         var buffer: [1 + max_prk_length + max_prk_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var key_schedule_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        try key_schedule_ctx.append(@enumToInt(mode));
+        try key_schedule_ctx.append(@intFromEnum(mode));
         try key_schedule_ctx.appendSlice(psk_id_hash.constSlice());
         try key_schedule_ctx.appendSlice(info_hash.constSlice());
         const psk_key: []const u8 = if (psk) |p| p.key else &[_]u8{};
