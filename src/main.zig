@@ -331,7 +331,7 @@ pub const Suite = struct {
     /// Expand a PRK using a suite, a label and optional information
     pub fn labeledExpand(suite: Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
         var out_length = [_]u8{ 0, 0 };
-        mem.writeIntBig(u16, &out_length, @intCast(u16, out.len));
+        mem.writeIntBig(u16, &out_length, @intCast(out.len));
         var buffer: [out_length.len + hpke_version.len + max_suite_id_length + max_label_length + max_info_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var labeled_info = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
