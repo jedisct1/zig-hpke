@@ -180,8 +180,8 @@ pub const primitives = struct {
             pub fn nextNonce(state: *State) BoundedArray(u8, max_aead_nonce_length) {
                 debug.assert(state.counter.len == state.base_nonce.len);
                 var base_nonce = @TypeOf(state.base_nonce).fromSlice(state.base_nonce.constSlice()) catch unreachable;
-                var nonce = base_nonce.slice();
-                var counter = state.counter.slice();
+                const nonce = base_nonce.slice();
+                const counter = state.counter.slice();
                 for (nonce, 0..) |*p, i| {
                     p.* ^= counter[i];
                 }
@@ -201,7 +201,7 @@ pub const primitives = struct {
                 }
                 var counter = try BoundedArray(u8, max_aead_nonce_length).init(A.nonce_length);
                 @memset(counter.slice(), 0);
-                var state = State{
+                const state = State{
                     .base_nonce = try BoundedArray(u8, max_aead_nonce_length).fromSlice(base_nonce),
                     .counter = counter,
                     .key = try BoundedArray(u8, max_aead_key_length).fromSlice(key),
@@ -369,11 +369,11 @@ pub const Suite = struct {
         try key_schedule_ctx.appendSlice(psk_id_hash.constSlice());
         try key_schedule_ctx.appendSlice(info_hash.constSlice());
         const psk_key: []const u8 = if (psk) |p| p.key else &[_]u8{};
-        var secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_key);
+        const secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_key);
         var exporter_secret = try BoundedArray(u8, max_prk_length).init(suite.kdf.prk_length);
         try suite.labeledExpand(exporter_secret.slice(), &suite.id.context, secret, "exp", key_schedule_ctx.items);
 
-        var outbound_state = if (suite.aead) |aead| blk: {
+        const outbound_state = if (suite.aead) |aead| blk: {
             var outbound_key = try BoundedArray(u8, max_aead_key_length).init(aead.key_length);
             try suite.labeledExpand(outbound_key.slice(), &suite.id.context, secret, "key", key_schedule_ctx.items);
             var outbound_base_nonce = try BoundedArray(u8, max_aead_nonce_length).init(aead.nonce_length);
@@ -395,7 +395,7 @@ pub const Suite = struct {
 
     /// Create a new deterministic key pair
     pub fn deterministicKeyPair(suite: Suite, seed: []const u8) !KeyPair {
-        var prk = try suite.labeledExtract(&suite.id.kem, null, "dkp_prk", seed);
+        const prk = try suite.labeledExtract(&suite.id.kem, null, "dkp_prk", seed);
         var secret_key = try BoundedArray(u8, max_secret_key_length).init(suite.kem.secret_length);
         try suite.labeledExpand(secret_key.slice(), &suite.id.kem, prk, "sk", null);
         return suite.kem.deterministicKeyPairFn(secret_key.constSlice());

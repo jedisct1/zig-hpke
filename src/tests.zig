@@ -13,7 +13,7 @@ test "hpke" {
         primitives.Aead.Aes128Gcm.id,
     );
 
-    var info_hex = "4f6465206f6e2061204772656369616e2055726e";
+    const info_hex = "4f6465206f6e2061204772656369616e2055726e";
     var info: [info_hex.len / 2]u8 = undefined;
     _ = try fmt.hexToBytes(&info, info_hex);
 
