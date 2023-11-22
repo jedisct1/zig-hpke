@@ -5,7 +5,7 @@ const mem = std.mem;
 const meta = std.meta;
 const ArrayList = std.ArrayList;
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
-const BoundedArray = std.BoundedArray;
+const BoundedArray = @import("bounded_array").BoundedArray;
 
 const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 
@@ -178,7 +178,7 @@ pub const primitives = struct {
 
             /// Increment the nonce
             pub fn nextNonce(state: *State) BoundedArray(u8, max_aead_nonce_length) {
-                debug.assert(state.counter.len == state.base_nonce.len);
+                debug.assert(state.counter.len() == state.base_nonce.len());
                 var base_nonce = @TypeOf(state.base_nonce).fromSlice(state.base_nonce.constSlice()) catch unreachable;
                 const nonce = base_nonce.slice();
                 const counter = state.counter.slice();
@@ -268,15 +268,15 @@ pub const Suite = struct {
 
     fn contextSuiteId(kem: primitives.Kem, kdf: primitives.Kdf, aead: ?primitives.Aead) [10]u8 {
         var id = [10]u8{ 'H', 'P', 'K', 'E', 0, 0, 0, 0, 0, 0 };
-        mem.writeIntBig(u16, id[4..6], kem.id);
-        mem.writeIntBig(u16, id[6..8], kdf.id);
-        mem.writeIntBig(u16, id[8..10], if (aead) |a| a.id else primitives.Aead.ExportOnly.id);
+        mem.writeInt(u16, id[4..6], kem.id, .big);
+        mem.writeInt(u16, id[6..8], kdf.id, .big);
+        mem.writeInt(u16, id[8..10], if (aead) |a| a.id else primitives.Aead.ExportOnly.id, .big);
         return id;
     }
 
     fn kemSuiteId(kem: primitives.Kem) [5]u8 {
         var id = [5]u8{ 'K', 'E', 'M', 0, 0 };
-        mem.writeIntBig(u16, id[3..5], kem.id);
+        mem.writeInt(u16, id[3..5], kem.id, .big);
         return id;
     }
 
@@ -331,7 +331,7 @@ pub const Suite = struct {
     /// Expand a PRK using a suite, a label and optional information
     pub fn labeledExpand(suite: Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
         var out_length = [_]u8{ 0, 0 };
-        mem.writeIntBig(u16, &out_length, @intCast(out.len));
+        mem.writeInt(u16, &out_length, @intCast(out.len), .big);
         var buffer: [out_length.len + hpke_version.len + max_suite_id_length + max_label_length + max_info_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var labeled_info = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
@@ -438,9 +438,9 @@ pub const Suite = struct {
         try suite.kem.dhFn(dh1.slice(), server_pk, eph_kp.secret_key.constSlice());
         var dh2 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh2.slice(), server_pk, client_kp.secret_key.constSlice());
-        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
-        @memcpy(dh.slice()[0..dh1.len], dh1.constSlice());
-        @memcpy(dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
+        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len() + dh2.len());
+        @memcpy(dh.slice()[0..dh1.len()], dh1.constSlice());
+        @memcpy(dh.slice()[dh1.len()..][0..dh2.len()], dh2.constSlice());
         var buffer: [3 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
@@ -472,9 +472,9 @@ pub const Suite = struct {
         try suite.kem.dhFn(dh1.slice(), eph_pk, server_kp.secret_key.constSlice());
         var dh2 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh2.slice(), client_pk, server_kp.secret_key.constSlice());
-        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
-        @memcpy(dh.slice()[0..dh1.len], dh1.constSlice());
-        @memcpy(dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
+        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len() + dh2.len());
+        @memcpy(dh.slice()[0..dh1.len()], dh1.constSlice());
+        @memcpy(dh.slice()[dh1.len()..][0..dh2.len()], dh2.constSlice());
         var buffer: [3 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
