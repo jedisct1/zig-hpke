@@ -1,0 +1,14 @@
+.{
+    .name = "hpke",
+    .description = "Hybrid Public Key Encryption",
+    .version = "0.1.0",
+
+    .dependencies = .{ .bounded_array = .{
+        .url = "https://github.com/jedisct1/zig-bounded-array/archive/1ada920764162362c047c1bcf2a17dc2d91638f7.tar.gz",
+        .hash = "1220ae69c7dbc08775566db243f7644490a04496eb78ab4030fe13c8b0ca4cb3c024",
+    } },
+
+    .paths = .{
+        "",
+    },
+}
