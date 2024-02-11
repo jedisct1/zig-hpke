@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    lib.addModule("bounded_array", bounded_array_module);
+    lib.root_module.addImport("bounded_array", bounded_array_module);
     b.installArtifact(lib);
 
     const main_tests = b.addTest(.{
@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    main_tests.addModule("bounded_array", bounded_array_module);
+    main_tests.root_module.addImport("bounded_array", bounded_array_module);
 
     const main_tests_run = b.addRunArtifact(main_tests);
 
