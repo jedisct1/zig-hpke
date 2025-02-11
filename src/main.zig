@@ -5,7 +5,7 @@ const mem = std.mem;
 const meta = std.meta;
 const ArrayList = std.ArrayList;
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
-const BoundedArray = @import("bounded_array").BoundedArray;
+const BoundedArray = std.BoundedArray;
 
 const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
 

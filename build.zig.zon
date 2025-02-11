@@ -3,11 +3,6 @@
     .description = "Hybrid Public Key Encryption",
     .version = "0.1.0",
 
-    .dependencies = .{ .bounded_array = .{
-        .url = "https://github.com/jedisct1/zig-bounded-array/archive/bb1542152ec3696275f0334a18cb7d9edbaa4a5a.tar.gz",
-        .hash = "12207ae868fa8dc56e2e3956505531c713c92622b6e0cc22745cd74d7454c11248c7",
-    } },
-
     .paths = .{
         "",
     },
