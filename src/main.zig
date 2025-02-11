@@ -60,7 +60,7 @@ pub const primitives = struct {
             pub const shared_length: usize = crypto.dh.X25519.shared_length;
 
             fn generateKeyPair() !KeyPair {
-                const kp = try crypto.dh.X25519.KeyPair.create(null);
+                const kp = crypto.dh.X25519.KeyPair.generate();
                 return KeyPair{
                     .public_key = try BoundedArray(u8, max_public_key_length).fromSlice(&kp.public_key),
                     .secret_key = try BoundedArray(u8, max_secret_key_length).fromSlice(&kp.secret_key),
@@ -178,7 +178,7 @@ pub const primitives = struct {
 
             /// Increment the nonce
             pub fn nextNonce(state: *State) BoundedArray(u8, max_aead_nonce_length) {
-                debug.assert(state.counter.len() == state.base_nonce.len());
+                debug.assert(state.counter.len == state.base_nonce.len);
                 var base_nonce = @TypeOf(state.base_nonce).fromSlice(state.base_nonce.constSlice()) catch unreachable;
                 const nonce = base_nonce.slice();
                 const counter = state.counter.slice();
@@ -438,9 +438,9 @@ pub const Suite = struct {
         try suite.kem.dhFn(dh1.slice(), server_pk, eph_kp.secret_key.constSlice());
         var dh2 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh2.slice(), server_pk, client_kp.secret_key.constSlice());
-        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len() + dh2.len());
-        @memcpy(dh.slice()[0..dh1.len()], dh1.constSlice());
-        @memcpy(dh.slice()[dh1.len()..][0..dh2.len()], dh2.constSlice());
+        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
+        @memcpy(dh.slice()[0..dh1.len], dh1.constSlice());
+        @memcpy(dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
         var buffer: [3 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
@@ -472,9 +472,9 @@ pub const Suite = struct {
         try suite.kem.dhFn(dh1.slice(), eph_pk, server_kp.secret_key.constSlice());
         var dh2 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
         try suite.kem.dhFn(dh2.slice(), client_pk, server_kp.secret_key.constSlice());
-        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len() + dh2.len());
-        @memcpy(dh.slice()[0..dh1.len()], dh1.constSlice());
-        @memcpy(dh.slice()[dh1.len()..][0..dh2.len()], dh2.constSlice());
+        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
+        @memcpy(dh.slice()[0..dh1.len], dh1.constSlice());
+        @memcpy(dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
         var buffer: [3 * max_public_key_length]u8 = undefined;
         var alloc = FixedBufferAllocator.init(&buffer);
         var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
