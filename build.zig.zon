@@ -1,9 +1,13 @@
 .{
     .name = "hpke",
     .description = "Hybrid Public Key Encryption",
-    .version = "0.1.0",
+    .version = "0.1.1",
 
     .paths = .{
-        "",
+        "src",
+        "build.zig.zon",
+        "build.zig",
+        "LICENSE",
+        "README.md",
     },
 }
