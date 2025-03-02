@@ -1,7 +1,8 @@
 .{
-    .name = "hpke",
+    .name = .hpke,
     .description = "Hybrid Public Key Encryption",
-    .version = "0.1.1",
+    .version = "0.1.2",
+    .fingerprint = 0x30f64f1bd6cf32f0,
 
     .paths = .{
         "src",
