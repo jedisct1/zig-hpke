@@ -2,6 +2,12 @@
     .name = .hpke,
     .description = "Hybrid Public Key Encryption",
     .version = "0.1.2",
+    .dependencies = .{
+        .bounded_array = .{
+            .url = "https://github.com/jedisct1/zig-bounded-array/archive/refs/tags/0.1.0.tar.gz",
+            .hash = "bounded_array-0.1.0-VF2RKidJAABQywm1YzfjMMwuog59V7gFdG_CXPWumthx",
+        },
+    },
     .fingerprint = 0x30f64f1bd6cf32f0,
 
     .paths = .{

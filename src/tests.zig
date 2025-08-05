@@ -1,5 +1,5 @@
 const std = @import("std");
-const hpke = @import("main.zig");
+const hpke = @import("hpke");
 const fmt = std.fmt;
 const testing = std.testing;
 const primitives = hpke.primitives;
