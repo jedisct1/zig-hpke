@@ -7,6 +7,7 @@ const max_aead_tag_length = hpke.max_aead_tag_length;
 const Suite = hpke.Suite;
 
 test "hpke" {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const suite = try Suite.init(
         primitives.Kem.X25519HkdfSha256.id,
         primitives.Kdf.HkdfSha256.id,
@@ -33,7 +34,7 @@ test "hpke" {
     _ = try fmt.hexToBytes(&client_seed, client_seed_hex);
     var client_kp = try suite.deterministicKeyPair(&client_seed);
 
-    var client_ctx_and_encapsulated_secret = try suite.createClientContext(server_kp.public_key.slice(), &info, null, &client_seed);
+    var client_ctx_and_encapsulated_secret = try suite.createClientContext(server_kp.public_key.slice(), &info, null, &client_seed, io);
     var encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
     _ = try fmt.hexToBytes(&expected, "e7d9aa41faa0481c005d1343b26939c0748a5f6bf1f81fbd1a4e924bf0719149");
     try testing.expectEqualSlices(u8, &expected, encapsulated_secret.encapsulated.constSlice());
@@ -79,6 +80,7 @@ test "hpke" {
         &info,
         null,
         null,
+        io,
     );
     encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
     client_ctx = client_ctx_and_encapsulated_secret.client_ctx;
