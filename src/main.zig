@@ -1,633 +1,644 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const crypto = std.crypto;
-const debug = std.debug;
 const mem = std.mem;
-const meta = std.meta;
-const ArrayList = std.ArrayList;
-const FixedBufferAllocator = std.heap.FixedBufferAllocator;
-const BoundedArray = @import("bounded_array").BoundedArray;
+const testing = std.testing;
 
-const hpke_version = [7]u8{ 'H', 'P', 'K', 'E', '-', 'v', '1' };
+/// HPKE operation mode per RFC 9180 Section 5.1.
+pub const Mode = enum(u8) { base = 0, psk = 1, auth = 2, auth_psk = 3 };
 
-/// HPKE mode
-pub const Mode = enum(u8) { base = 0x00, psk = 0x01, auth = 0x02, authPsk = 0x03 };
+/// Key Encapsulation Mechanism identifier.
+pub const KemId = enum(u16) {
+    p256_sha256 = 0x0010,
+    p384_sha384 = 0x0011,
+    x25519_sha256 = 0x0020,
 
-/// Maximum length of a public key in bytes
-pub const max_public_key_length: usize = 32;
-/// Maximum length of a secret key in bytes
-pub const max_secret_key_length: usize = 32;
-/// Maximum length of a shared key in bytes
-pub const max_shared_key_length: usize = 32;
-/// Maximum length of a PRK in bytes
-pub const max_prk_length: usize = 32;
-/// Maximum length of a label in bytes
-pub const max_label_length: usize = 128;
-/// Maximum length of an info string in bytes
-pub const max_info_length: usize = 1024;
-/// Maximum length of a suite ID
-pub const max_suite_id_length: usize = 10;
-/// Maximum length of a hash function
-pub const max_digest_length: usize = 32;
-/// Maximum length of input keying material
-pub const max_ikm_length: usize = 64;
-/// Maximum length of an AEAD key
-pub const max_aead_key_length: usize = 32;
-/// Maximum length of an AEAD nonce
-pub const max_aead_nonce_length: usize = 12;
-/// Maximum length of an AEAD tag
-pub const max_aead_tag_length: usize = 16;
-
-/// HPKE primitives
-pub const primitives = struct {
-    /// Key exchange mechanisms
-    pub const Kem = struct {
-        id: u16,
-        secret_length: usize,
-        public_length: usize,
-        shared_length: usize,
-        digest_length: usize,
-        generateKeyPairFn: *const fn (std.Io) anyerror!KeyPair,
-        deterministicKeyPairFn: *const fn (secret_key: []const u8) anyerror!KeyPair,
-        dhFn: *const fn (out: []u8, pk: []const u8, sk: []const u8) anyerror!void,
-
-        /// X25519-HKDF-SHA256
-        pub const X25519HkdfSha256 = struct {
-            const H = crypto.hash.sha2.Sha256;
-            const K = crypto.kdf.hkdf.HkdfSha256;
-            pub const id: u16 = 0x0020;
-            pub const secret_length: usize = crypto.dh.X25519.secret_length;
-            pub const public_length: usize = crypto.dh.X25519.public_length;
-            pub const shared_length: usize = crypto.dh.X25519.shared_length;
-
-            fn generateKeyPair(io: std.Io) !KeyPair {
-                const kp = crypto.dh.X25519.KeyPair.generate(io);
-                return KeyPair{
-                    .public_key = try BoundedArray(u8, max_public_key_length).fromSlice(&kp.public_key),
-                    .secret_key = try BoundedArray(u8, max_secret_key_length).fromSlice(&kp.secret_key),
-                };
-            }
-
-            fn deterministicKeyPair(secret_key: []const u8) !KeyPair {
-                debug.assert(secret_key.len == secret_length);
-                const public_key = try crypto.dh.X25519.recoverPublicKey(secret_key[0..secret_length].*);
-                return KeyPair{
-                    .public_key = try BoundedArray(u8, max_public_key_length).fromSlice(&public_key),
-                    .secret_key = try BoundedArray(u8, max_secret_key_length).fromSlice(secret_key),
-                };
-            }
-
-            fn dh(out: []u8, pk: []const u8, sk: []const u8) !void {
-                if (pk.len != public_length or sk.len != secret_length or out.len != shared_length) {
-                    return error.InvalidParameters;
-                }
-                const dh_secret = try crypto.dh.X25519.scalarmult(sk[0..secret_length].*, pk[0..public_length].*);
-                @memcpy(out, &dh_secret);
-            }
-
-            pub const kem = Kem{
-                .id = 0x0020,
-                .secret_length = secret_length,
-                .shared_length = shared_length,
-                .public_length = public_length,
-                .digest_length = H.digest_length,
-                .generateKeyPairFn = generateKeyPair,
-                .deterministicKeyPairFn = deterministicKeyPair,
-                .dhFn = dh,
-            };
+    /// Returns the KDF naturally paired with this KEM.
+    pub fn kdf(self: KemId) KdfId {
+        return switch (self) {
+            .x25519_sha256, .p256_sha256 => .hkdf_sha256,
+            .p384_sha384 => .hkdf_sha384,
         };
-
-        /// Return a suite given a suite ID
-        pub fn fromId(id: u16) !Kem {
-            return switch (id) {
-                X25519HkdfSha256.id => X25519HkdfSha256.kem,
-                else => error.UnsupportedKem,
-            };
-        }
-    };
-
-    /// Key derivation functions
-    pub const Kdf = struct {
-        id: u16,
-        prk_length: usize,
-        extract: *const fn (out: []u8, salt: []const u8, ikm: []const u8) void,
-        expand: *const fn (out: []u8, ctx: []const u8, prk: []const u8) void,
-
-        /// HKDF-SHA-256
-        pub const HkdfSha256 = struct {
-            const M = crypto.auth.hmac.sha2.HmacSha256;
-            const F = crypto.kdf.hkdf.Hkdf(M);
-            pub const prk_length = M.mac_length;
-            pub const id: u16 = 0x0001;
-
-            fn extract(out: []u8, salt: []const u8, ikm: []const u8) void {
-                const prk = F.extract(salt, ikm);
-                debug.assert(prk.len == out.len);
-                @memcpy(out, &prk);
-            }
-
-            fn expand(out: []u8, ctx: []const u8, prk: []const u8) void {
-                debug.assert(prk.len == prk_length);
-                F.expand(out, ctx, prk[0..prk_length].*);
-            }
-
-            pub const kdf = Kdf{
-                .id = id,
-                .prk_length = prk_length,
-                .extract = extract,
-                .expand = expand,
-            };
-        };
-
-        /// Return a KDF from a KDF id
-        pub fn fromId(id: u16) !Kdf {
-            return switch (id) {
-                HkdfSha256.id => HkdfSha256.kdf,
-                else => error.UnsupportedKdf,
-            };
-        }
-    };
-
-    /// AEADs
-    pub const Aead = struct {
-        id: u16,
-        key_length: usize,
-        nonce_length: usize,
-        tag_length: usize,
-        newStateFn: *const fn (key: []const u8, base_nonce: []const u8) error{ InvalidParameters, Overflow }!State,
-
-        /// An AEAD state
-        pub const State = struct {
-            base_nonce: BoundedArray(u8, max_aead_nonce_length),
-            counter: BoundedArray(u8, max_aead_nonce_length),
-            key: BoundedArray(u8, max_aead_key_length),
-            encryptFn: *const fn (c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void,
-            decryptFn: *const fn (m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) crypto.errors.AuthenticationError!void,
-
-            fn incrementCounter(counter: []u8) void {
-                var i = counter.len;
-                var carry: u1 = 1;
-                while (true) {
-                    i -= 1;
-                    const res = @addWithOverflow(counter[i], carry);
-                    counter[i] = res[0];
-                    carry = res[1];
-                    if (i == 0) break;
-                }
-                debug.assert(carry == 0); // Counter overflow
-            }
-
-            /// Increment the nonce
-            pub fn nextNonce(state: *State) BoundedArray(u8, max_aead_nonce_length) {
-                debug.assert(state.counter.len == state.base_nonce.len);
-                var base_nonce = @TypeOf(state.base_nonce).fromSlice(state.base_nonce.constSlice()) catch unreachable;
-                const nonce = base_nonce.slice();
-                const counter = state.counter.slice();
-                for (nonce, 0..) |*p, i| {
-                    p.* ^= counter[i];
-                }
-                incrementCounter(counter);
-                return BoundedArray(u8, max_aead_nonce_length).fromSlice(nonce) catch unreachable;
-            }
-        };
-
-        /// AES-128-GCM
-        pub const Aes128Gcm = struct {
-            const A = crypto.aead.aes_gcm.Aes128Gcm;
-            pub const id: u16 = 0x0001;
-
-            fn newState(key: []const u8, base_nonce: []const u8) error{ InvalidParameters, Overflow }!State {
-                if (key.len != A.key_length or base_nonce.len != A.nonce_length) {
-                    return error.InvalidParameters;
-                }
-                var counter = try BoundedArray(u8, max_aead_nonce_length).init(A.nonce_length);
-                @memset(counter.slice(), 0);
-                const state = State{
-                    .base_nonce = try BoundedArray(u8, max_aead_nonce_length).fromSlice(base_nonce),
-                    .counter = counter,
-                    .key = try BoundedArray(u8, max_aead_key_length).fromSlice(key),
-                    .encryptFn = encrypt,
-                    .decryptFn = decrypt,
-                };
-                return state;
-            }
-
-            fn encrypt(c: []u8, m: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) void {
-                A.encrypt(c[0..m.len], c[m.len..][0..A.tag_length], m, ad, nonce[0..A.nonce_length].*, key[0..A.key_length].*);
-            }
-
-            fn decrypt(m: []u8, c: []const u8, ad: []const u8, nonce: []const u8, key: []const u8) !void {
-                return A.decrypt(m, c[0..m.len], c[m.len..][0..A.tag_length].*, ad, nonce[0..A.nonce_length].*, key[0..A.key_length].*);
-            }
-
-            pub const aead = Aead{
-                .id = id,
-                .key_length = A.key_length,
-                .nonce_length = A.nonce_length,
-                .tag_length = A.tag_length,
-                .newStateFn = newState,
-            };
-        };
-
-        /// Use an external AEAD
-        pub const ExportOnly = struct {
-            pub const id: u16 = 0xffff;
-        };
-
-        /// Return an AEAD given an ID
-        pub fn fromId(id: u16) !?Aead {
-            return switch (id) {
-                Aes128Gcm.id => Aes128Gcm.aead,
-                ExportOnly.id => null,
-                else => error.UnsupportedKdf,
-            };
-        }
-    };
-};
-
-/// A pre-shared key
-pub const Psk = struct {
-    key: []u8,
-    id: []u8,
-};
-
-/// A key pair
-pub const KeyPair = struct {
-    public_key: BoundedArray(u8, max_public_key_length),
-    secret_key: BoundedArray(u8, max_secret_key_length),
-};
-
-/// An HPKE suite
-pub const Suite = struct {
-    id: struct {
-        context: [10]u8,
-        kem: [5]u8,
-    },
-    kem: primitives.Kem,
-    kdf: primitives.Kdf,
-    aead: ?primitives.Aead,
-
-    fn contextSuiteId(kem: primitives.Kem, kdf: primitives.Kdf, aead: ?primitives.Aead) [10]u8 {
-        var id = [10]u8{ 'H', 'P', 'K', 'E', 0, 0, 0, 0, 0, 0 };
-        mem.writeInt(u16, id[4..6], kem.id, .big);
-        mem.writeInt(u16, id[6..8], kdf.id, .big);
-        mem.writeInt(u16, id[8..10], if (aead) |a| a.id else primitives.Aead.ExportOnly.id, .big);
-        return id;
     }
 
-    fn kemSuiteId(kem: primitives.Kem) [5]u8 {
-        var id = [5]u8{ 'K', 'E', 'M', 0, 0 };
-        mem.writeInt(u16, id[3..5], kem.id, .big);
-        return id;
+    /// Returns the shared secret length in bytes for this KEM.
+    pub fn nSecret(self: KemId) u16 {
+        return switch (self) {
+            .x25519_sha256, .p256_sha256 => 32,
+            .p384_sha384 => 48,
+        };
     }
 
-    /// Create an HPKE suite given its components identifiers
-    pub fn init(kem_id: u16, kdf_id: u16, aead_id: u16) !Suite {
-        const kem = switch (kem_id) {
-            primitives.Kem.X25519HkdfSha256.id => primitives.Kem.X25519HkdfSha256.kem,
-            else => unreachable,
+    fn NistCurve(comptime self: KemId) type {
+        return switch (self) {
+            .p256_sha256 => crypto.ecc.P256,
+            .p384_sha384 => crypto.ecc.P384,
+            .x25519_sha256 => @compileError("X25519 is not a NIST curve"),
         };
-        const kdf = try primitives.Kdf.fromId(kdf_id);
-        const aead = try primitives.Aead.fromId(aead_id);
-        return Suite{
-            .id = .{
-                .context = contextSuiteId(kem, kdf, aead),
-                .kem = kemSuiteId(kem),
+    }
+};
+
+/// Key Derivation Function identifier.
+pub const KdfId = enum(u16) {
+    hkdf_sha256 = 1,
+    hkdf_sha384 = 2,
+    hkdf_sha512 = 3,
+
+    fn Hmac(comptime self: KdfId) type {
+        return switch (self) {
+            .hkdf_sha256 => crypto.auth.hmac.sha2.HmacSha256,
+            .hkdf_sha384 => crypto.auth.hmac.sha2.HmacSha384,
+            .hkdf_sha512 => crypto.auth.hmac.sha2.HmacSha512,
+        };
+    }
+};
+
+/// Authenticated Encryption with Associated Data identifier.
+pub const AeadId = enum(u16) {
+    aes128_gcm = 1,
+    aes256_gcm = 2,
+    chacha20_poly1305 = 3,
+    export_only = 0xFFFF,
+
+    fn Primitive(comptime self: AeadId) type {
+        return switch (self) {
+            .aes128_gcm => crypto.aead.aes_gcm.Aes128Gcm,
+            .aes256_gcm => crypto.aead.aes_gcm.Aes256Gcm,
+            .chacha20_poly1305 => crypto.aead.chacha_poly.ChaCha20Poly1305,
+            .export_only => @compileError("export_only has no AEAD primitive"),
+        };
+    }
+};
+
+/// Identifies a complete HPKE cipher suite (KEM + KDF + AEAD combination).
+pub const CipherSuiteId = enum(u16) {
+    x25519_hkdf_sha256_aes128_gcm = 0x0001,
+    x25519_hkdf_sha256_aes256_gcm = 0x0002,
+    x25519_hkdf_sha256_chacha20_poly1305 = 0x0003,
+    x25519_hkdf_sha384_aes256_gcm = 0x0012,
+    x25519_hkdf_sha512_aes256_gcm = 0x0022,
+    x25519_hkdf_sha256_export_only = 0x00FF,
+    p256_hkdf_sha256_aes128_gcm = 0x0101,
+    p256_hkdf_sha256_aes256_gcm = 0x0102,
+    p256_hkdf_sha256_chacha20_poly1305 = 0x0103,
+    p384_hkdf_sha384_aes256_gcm = 0x0202,
+    p384_hkdf_sha384_chacha20_poly1305 = 0x0203,
+
+    const Components = struct { kem: KemId, kdf: KdfId, aead: AeadId };
+
+    const suite_map: std.enums.EnumArray(CipherSuiteId, Components) = .init(.{
+        .x25519_hkdf_sha256_aes128_gcm = .{ .kem = .x25519_sha256, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
+        .x25519_hkdf_sha256_aes256_gcm = .{ .kem = .x25519_sha256, .kdf = .hkdf_sha256, .aead = .aes256_gcm },
+        .x25519_hkdf_sha256_chacha20_poly1305 = .{ .kem = .x25519_sha256, .kdf = .hkdf_sha256, .aead = .chacha20_poly1305 },
+        .x25519_hkdf_sha384_aes256_gcm = .{ .kem = .x25519_sha256, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
+        .x25519_hkdf_sha512_aes256_gcm = .{ .kem = .x25519_sha256, .kdf = .hkdf_sha512, .aead = .aes256_gcm },
+        .x25519_hkdf_sha256_export_only = .{ .kem = .x25519_sha256, .kdf = .hkdf_sha256, .aead = .export_only },
+        .p256_hkdf_sha256_aes128_gcm = .{ .kem = .p256_sha256, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
+        .p256_hkdf_sha256_aes256_gcm = .{ .kem = .p256_sha256, .kdf = .hkdf_sha256, .aead = .aes256_gcm },
+        .p256_hkdf_sha256_chacha20_poly1305 = .{ .kem = .p256_sha256, .kdf = .hkdf_sha256, .aead = .chacha20_poly1305 },
+        .p384_hkdf_sha384_aes256_gcm = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
+        .p384_hkdf_sha384_chacha20_poly1305 = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .chacha20_poly1305 },
+    });
+
+    /// Looks up the suite ID for a given KEM/KDF/AEAD triple, or null if unsupported.
+    pub fn fromComponents(kem: KemId, kdf: KdfId, aead: AeadId) ?CipherSuiteId {
+        inline for (@typeInfo(CipherSuiteId).@"enum".fields) |f| {
+            const id: CipherSuiteId = @enumFromInt(f.value);
+            const c = comptime suite_map.get(id);
+            if (c.kem == kem and c.kdf == kdf and c.aead == aead) return id;
+        }
+        return null;
+    }
+
+    /// Decomposes this suite ID into its KEM, KDF, and AEAD components.
+    pub fn getComponents(self: CipherSuiteId) Components {
+        return suite_map.get(self);
+    }
+};
+
+const max_hash_length = 64;
+const max_key_length = 32;
+const max_nonce_length = 12;
+const max_tag_length = 16;
+const max_enc_length = 97;
+const max_public_key_length = 97;
+const max_secret_key_length = 48;
+const max_shared_length = 96; // 2x for auth mode dual-DH
+
+/// Resolved parameters for a given `CipherSuiteId` -- key lengths, hash sizes, etc.
+pub const CipherSuite = struct {
+    id: CipherSuiteId,
+    kem: KemId,
+    kdf: KdfId,
+    aead: AeadId,
+    public_key_length: u16,
+    secret_key_length: u16,
+    enc_length: u16,
+    hash_length: u16,
+    key_length: u16,
+    nonce_length: u16,
+    tag_length: u16,
+
+    pub fn init(suite_id: CipherSuiteId) CipherSuite {
+        const components = suite_id.getComponents();
+
+        const kem_sizes: struct { pk: u16, sk: u16, enc: u16 } = switch (components.kem) {
+            .x25519_sha256 => .{ .pk = 32, .sk = 32, .enc = 32 },
+            .p256_sha256 => .{ .pk = 65, .sk = 32, .enc = 65 },
+            .p384_sha384 => .{ .pk = 97, .sk = 48, .enc = 97 },
+        };
+
+        return .{
+            .id = suite_id,
+            .kem = components.kem,
+            .kdf = components.kdf,
+            .aead = components.aead,
+            .public_key_length = kem_sizes.pk,
+            .secret_key_length = kem_sizes.sk,
+            .enc_length = kem_sizes.enc,
+            .hash_length = switch (components.kdf) {
+                .hkdf_sha256 => 32,
+                .hkdf_sha384 => 48,
+                .hkdf_sha512 => 64,
             },
-            .kem = kem,
-            .kdf = kdf,
-            .aead = aead,
+            .key_length = switch (components.aead) {
+                .aes128_gcm => 16,
+                .aes256_gcm => 32,
+                .chacha20_poly1305 => 32,
+                .export_only => 0,
+            },
+            .nonce_length = switch (components.aead) {
+                .aes128_gcm, .aes256_gcm, .chacha20_poly1305 => 12,
+                .export_only => 0,
+            },
+            .tag_length = switch (components.aead) {
+                .aes128_gcm, .aes256_gcm, .chacha20_poly1305 => 16,
+                .export_only => 0,
+            },
         };
     }
 
-    /// Extract a PRK out of input keying material and an optional salt
-    pub fn extract(suite: Suite, prk: []u8, salt: ?[]const u8, ikm: []const u8) void {
-        const prk_length = suite.kdf.prk_length;
-        debug.assert(prk.len == prk_length);
-        suite.kdf.extract(prk, salt orelse "", ikm);
+    fn makeSuiteId(self: *const CipherSuite) [10]u8 {
+        var id: [10]u8 = undefined;
+        @memcpy(id[0..4], "HPKE");
+        mem.writeInt(u16, id[4..6], @intFromEnum(self.kem), .big);
+        mem.writeInt(u16, id[6..8], @intFromEnum(self.kdf), .big);
+        mem.writeInt(u16, id[8..10], @intFromEnum(self.aead), .big);
+        return id;
     }
+};
 
-    /// Expand a PRK into an arbitrary-long key for the context `ctx`
-    pub fn expand(suite: Suite, out: []u8, ctx: []const u8, prk: []const u8) void {
-        suite.kdf.expand(out, ctx, prk);
-    }
+pub const ExportOnlyError = error{ExportOnlyMode};
+pub const MessageLimitError = error{MessageLimitReached};
+pub const SealError = ExportOnlyError || MessageLimitError || crypto.errors.EncodingError;
+pub const OpenError = ExportOnlyError || MessageLimitError || crypto.errors.EncodingError || crypto.errors.AuthenticationError;
 
-    pub const Prk = BoundedArray(u8, max_prk_length);
+/// Sender encryption context for a single HPKE session.
+pub const SenderContext = struct {
+    suite: CipherSuite,
+    key: [max_key_length]u8,
+    base_nonce: [max_nonce_length]u8,
+    sequence: u64,
+    exporter_secret: [max_hash_length]u8,
 
-    /// Create a PRK given a suite ID, a label, input keying material and an optional salt
-    pub fn labeledExtract(suite: Suite, suite_id: []const u8, salt: ?[]const u8, label: []const u8, ikm: []const u8) !Prk {
-        var buffer: [hpke_version.len + max_suite_id_length + max_label_length + max_ikm_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var secret = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        secret.appendSliceAssumeCapacity(&hpke_version);
-        secret.appendSliceAssumeCapacity(suite_id);
-        secret.appendSliceAssumeCapacity(label);
-        secret.appendSliceAssumeCapacity(ikm);
-        var prk = try Prk.init(suite.kdf.prk_length);
-        suite.extract(prk.slice(), salt, secret.items);
+    pub fn seal(self: *SenderContext, out: []u8, plaintext: []const u8, aad: []const u8) SealError!void {
+        if (self.suite.aead == .export_only) return error.ExportOnlyMode;
+        if (out.len != plaintext.len + self.suite.tag_length) return error.InvalidEncoding;
+        if (self.sequence == std.math.maxInt(u64)) return error.MessageLimitReached;
 
-        return prk;
-    }
+        const nonce = computeNonce(self.base_nonce[0..self.suite.nonce_length], self.sequence, self.suite.nonce_length);
 
-    /// Expand a PRK using a suite, a label and optional information
-    pub fn labeledExpand(suite: Suite, out: []u8, suite_id: []const u8, prk: Prk, label: []const u8, info: ?[]const u8) !void {
-        var out_length = [_]u8{ 0, 0 };
-        mem.writeInt(u16, &out_length, @intCast(out.len), .big);
-        var buffer: [out_length.len + hpke_version.len + max_suite_id_length + max_label_length + max_info_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var labeled_info = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        labeled_info.appendSliceAssumeCapacity(&out_length);
-        labeled_info.appendSliceAssumeCapacity(&hpke_version);
-        labeled_info.appendSliceAssumeCapacity(suite_id);
-        labeled_info.appendSliceAssumeCapacity(label);
-        if (info) |i| labeled_info.appendSliceAssumeCapacity(i);
-        suite.expand(out, labeled_info.items, prk.constSlice());
-    }
-
-    fn verifyPskInputs(mode: Mode, psk: ?Psk) !void {
-        if (psk) |p| {
-            if ((p.key.len == 0) != (psk == null)) {
-                return error.PskKeyAndIdMustBeSet;
-            }
-            if (mode == .base or mode == .auth) {
-                return error.PskNotRequired;
-            }
-        } else if (mode == .psk or mode == .authPsk) {
-            return error.PskRequired;
+        switch (self.suite.aead) {
+            inline .aes128_gcm, .aes256_gcm, .chacha20_poly1305 => |aead_tag| {
+                const Aead = aead_tag.Primitive();
+                var tag_array: [Aead.tag_length]u8 = undefined;
+                Aead.encrypt(out[0..plaintext.len], &tag_array, plaintext, aad, nonce, self.key[0..Aead.key_length].*);
+                @memcpy(out[plaintext.len..][0..Aead.tag_length], &tag_array);
+            },
+            .export_only => unreachable,
         }
+
+        self.sequence += 1;
     }
 
-    fn keySchedule(suite: Suite, mode: Mode, dh_secret: []const u8, info: []const u8, psk: ?Psk) !Context {
-        try verifyPskInputs(mode, psk);
-        const psk_id: []const u8 = if (psk) |p| p.id else &[_]u8{};
-        var psk_id_hash = try suite.labeledExtract(&suite.id.context, null, "psk_id_hash", psk_id);
-        var info_hash = try suite.labeledExtract(&suite.id.context, null, "info_hash", info);
+    pub fn exportSecret(self: *const SenderContext, out: []u8, exporter_context: []const u8) void {
+        exportSecretImpl(self.suite, &self.exporter_secret, out, exporter_context);
+    }
+};
 
-        var buffer: [1 + max_prk_length + max_prk_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var key_schedule_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        key_schedule_ctx.appendAssumeCapacity(@intFromEnum(mode));
-        key_schedule_ctx.appendSliceAssumeCapacity(psk_id_hash.constSlice());
-        key_schedule_ctx.appendSliceAssumeCapacity(info_hash.constSlice());
-        const psk_key: []const u8 = if (psk) |p| p.key else &[_]u8{};
-        const secret = try suite.labeledExtract(&suite.id.context, dh_secret, "secret", psk_key);
-        var exporter_secret = try BoundedArray(u8, max_prk_length).init(suite.kdf.prk_length);
-        try suite.labeledExpand(exporter_secret.slice(), &suite.id.context, secret, "exp", key_schedule_ctx.items);
+/// Recipient decryption context for a single HPKE session.
+pub const RecipientContext = struct {
+    suite: CipherSuite,
+    key: [max_key_length]u8,
+    base_nonce: [max_nonce_length]u8,
+    sequence: u64,
+    exporter_secret: [max_hash_length]u8,
 
-        const outbound_state = if (suite.aead) |aead| blk: {
-            var outbound_key = try BoundedArray(u8, max_aead_key_length).init(aead.key_length);
-            try suite.labeledExpand(outbound_key.slice(), &suite.id.context, secret, "key", key_schedule_ctx.items);
-            var outbound_base_nonce = try BoundedArray(u8, max_aead_nonce_length).init(aead.nonce_length);
-            try suite.labeledExpand(outbound_base_nonce.slice(), &suite.id.context, secret, "base_nonce", key_schedule_ctx.items);
-            break :blk try aead.newStateFn(outbound_key.constSlice(), outbound_base_nonce.constSlice());
-        } else null;
+    pub fn open(self: *RecipientContext, out: []u8, ciphertext_with_tag: []const u8, aad: []const u8) OpenError!void {
+        if (self.suite.aead == .export_only) return error.ExportOnlyMode;
+        if (ciphertext_with_tag.len < self.suite.tag_length) return error.InvalidEncoding;
+        if (out.len != ciphertext_with_tag.len - self.suite.tag_length) return error.InvalidEncoding;
+        if (self.sequence == std.math.maxInt(u64)) return error.MessageLimitReached;
 
-        return Context{
+        const nonce = computeNonce(self.base_nonce[0..self.suite.nonce_length], self.sequence, self.suite.nonce_length);
+        const ct_len = ciphertext_with_tag.len - self.suite.tag_length;
+
+        switch (self.suite.aead) {
+            inline .aes128_gcm, .aes256_gcm, .chacha20_poly1305 => |aead_tag| {
+                const Aead = aead_tag.Primitive();
+                try Aead.decrypt(out, ciphertext_with_tag[0..ct_len], ciphertext_with_tag[ct_len..][0..Aead.tag_length].*, aad, nonce, self.key[0..Aead.key_length].*);
+            },
+            .export_only => unreachable,
+        }
+
+        self.sequence += 1;
+    }
+
+    pub fn exportSecret(self: *const RecipientContext, out: []u8, exporter_context: []const u8) void {
+        exportSecretImpl(self.suite, &self.exporter_secret, out, exporter_context);
+    }
+};
+
+fn exportSecretImpl(suite: CipherSuite, exporter_secret: *const [max_hash_length]u8, out: []u8, exporter_context: []const u8) void {
+    const suite_id = suite.makeSuiteId();
+    labeledExpand(suite.kdf, exporter_secret[0..suite.hash_length], "sec", exporter_context, &suite_id, out);
+}
+
+fn computeNonce(base: []const u8, seq: u64, nn: u16) [max_nonce_length]u8 {
+    var nonce: [max_nonce_length]u8 = @splat(0);
+    @memcpy(nonce[0..nn], base);
+
+    var seq_bytes: [8]u8 = undefined;
+    mem.writeInt(u64, &seq_bytes, seq, .big);
+
+    const offset = if (nn >= 8) nn - 8 else 0;
+    const seq_offset = if (nn < 8) 8 - nn else 0;
+    const len = @min(nn, 8);
+
+    for (0..len) |i| {
+        nonce[offset + i] ^= seq_bytes[seq_offset + i];
+    }
+    return nonce;
+}
+
+pub const SetupError = crypto.errors.IdentityElementError ||
+    crypto.errors.EncodingError ||
+    crypto.errors.NonCanonicalError ||
+    crypto.errors.NotSquareError ||
+    crypto.errors.WeakPublicKeyError ||
+    crypto.errors.WeakParametersError;
+
+/// Result of a sender setup: the encapsulated key and the encryption context.
+pub const SenderResult = struct {
+    enc: [max_enc_length]u8,
+    enc_length: usize,
+    ctx: SenderContext,
+};
+
+/// HPKE (Hybrid Public Key Encryption) per RFC 9180.
+pub const Hpke = struct {
+    suite: CipherSuite,
+
+    pub fn init(suite_id: CipherSuiteId) Hpke {
+        return .{ .suite = CipherSuite.init(suite_id) };
+    }
+
+    pub fn senderSetup(self: *const Hpke, pk_r: []const u8, info: []const u8, io: std.Io) SetupError!SenderResult {
+        return self.senderSetupCore(pk_r, info, .base, "", "", null, io);
+    }
+
+    pub fn senderSetupDeterministic(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_e: []const u8) SetupError!SenderResult {
+        return self.senderSetupDeterministicCore(pk_r, info, .base, "", "", sk_e, null);
+    }
+
+    pub fn senderSetupDeterministicPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_e: []const u8) SetupError!SenderResult {
+        return self.senderSetupDeterministicCore(pk_r, info, .psk, psk, psk_id, sk_e, null);
+    }
+
+    pub fn senderSetupDeterministicAuth(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_s: []const u8, sk_e: []const u8) SetupError!SenderResult {
+        return self.senderSetupDeterministicCore(pk_r, info, .auth, "", "", sk_e, sk_s);
+    }
+
+    pub fn senderSetupDeterministicAuthPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_s: []const u8, sk_e: []const u8) SetupError!SenderResult {
+        return self.senderSetupDeterministicCore(pk_r, info, .auth_psk, psk, psk_id, sk_e, sk_s);
+    }
+
+    pub fn recipientSetup(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8) SetupError!RecipientContext {
+        return self.recipientSetupCore(enc, sk_r, info, .base, "", "", null);
+    }
+
+    pub fn senderSetupPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, io: std.Io) SetupError!SenderResult {
+        return self.senderSetupCore(pk_r, info, .psk, psk, psk_id, null, io);
+    }
+
+    pub fn recipientSetupPSK(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8) SetupError!RecipientContext {
+        return self.recipientSetupCore(enc, sk_r, info, .psk, psk, psk_id, null);
+    }
+
+    pub fn senderSetupAuth(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_s: []const u8, io: std.Io) SetupError!SenderResult {
+        return self.senderSetupCore(pk_r, info, .auth, "", "", sk_s, io);
+    }
+
+    pub fn recipientSetupAuth(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, pk_s: []const u8) SetupError!RecipientContext {
+        return self.recipientSetupCore(enc, sk_r, info, .auth, "", "", pk_s);
+    }
+
+    pub fn senderSetupAuthPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_s: []const u8, io: std.Io) SetupError!SenderResult {
+        return self.senderSetupCore(pk_r, info, .auth_psk, psk, psk_id, sk_s, io);
+    }
+
+    pub fn recipientSetupAuthPSK(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, pk_s: []const u8) SetupError!RecipientContext {
+        return self.recipientSetupCore(enc, sk_r, info, .auth_psk, psk, psk_id, pk_s);
+    }
+
+    pub fn deriveKeyPair(self: *const Hpke, seed: []const u8) struct { sk: [max_secret_key_length]u8, pk: [max_public_key_length]u8 } {
+        var kem_suite_id: [5]u8 = undefined;
+        @memcpy(kem_suite_id[0..3], "KEM");
+        mem.writeInt(u16, kem_suite_id[3..5], @intFromEnum(self.suite.kem), .big);
+
+        const kem_kdf = self.suite.kem.kdf();
+        const n_secret = self.suite.kem.nSecret();
+        var prk: [max_hash_length]u8 = undefined;
+        labeledExtract(kem_kdf, "", "dkp_prk", seed, &kem_suite_id, prk[0..n_secret]);
+
+        var sk: [max_secret_key_length]u8 = @splat(0);
+        var pk: [max_public_key_length]u8 = @splat(0);
+
+        switch (self.suite.kem) {
+            .x25519_sha256 => {
+                labeledExpand(kem_kdf, prk[0..n_secret], "sk", "", &kem_suite_id, sk[0..32]);
+                const pk_32 = crypto.dh.X25519.recoverPublicKey(sk[0..32].*) catch unreachable;
+                @memcpy(pk[0..32], &pk_32);
+            },
+            inline .p256_sha256, .p384_sha384 => |tag| {
+                const Curve = tag.NistCurve();
+                const n = comptime tag.nSecret();
+                var counter: u8 = 0;
+                while (true) : (counter += 1) {
+                    if (counter > 255) unreachable;
+                    labeledExpand(kem_kdf, prk[0..n_secret], "candidate", &[_]u8{counter}, &kem_suite_id, sk[0..n]);
+                    sk[0] &= 0xFF;
+                    const sk_int = mem.readInt(std.meta.Int(.unsigned, n * 8), sk[0..n], .big);
+                    if (sk_int == 0 or sk_int >= Curve.scalar.field_order) continue;
+                    break;
+                }
+                const pk_point = Curve.basePoint.mul(sk[0..n].*, .big) catch unreachable;
+                const pk_bytes = pk_point.toUncompressedSec1();
+                @memcpy(pk[0 .. 1 + 2 * n], &pk_bytes);
+            },
+        }
+        return .{ .sk = sk, .pk = pk };
+    }
+
+    fn senderSetupDeterministicCore(self: *const Hpke, pk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, sk_e: []const u8, sk_s: ?[]const u8) SetupError!SenderResult {
+        const pk_e = try publicKeyFromSecret(self.suite.kem, sk_e);
+        const pk_e_len = self.suite.enc_length;
+
+        var dh: [max_shared_length]u8 = undefined;
+        const dh1 = try dhCompute(self.suite.kem, sk_e, pk_r);
+        const n = self.suite.kem.nSecret();
+        @memcpy(dh[0..n], dh1[0..n]);
+
+        var dh_len: usize = n;
+        var kem_ctx_buf: [3 * max_public_key_length]u8 = undefined;
+        @memcpy(kem_ctx_buf[0..pk_e_len], pk_e[0..pk_e_len]);
+        @memcpy(kem_ctx_buf[pk_e_len..][0..pk_r.len], pk_r);
+        var kem_ctx_len: usize = pk_e_len + pk_r.len;
+
+        if (mode == .auth or mode == .auth_psk) {
+            const sks = sk_s orelse return error.WeakParameters;
+            const dh2 = try dhCompute(self.suite.kem, sks, pk_r);
+            @memcpy(dh[n..][0..n], dh2[0..n]);
+            dh_len += n;
+            const pk_s = try publicKeyFromSecret(self.suite.kem, sks);
+            const pk_len = self.suite.public_key_length;
+            @memcpy(kem_ctx_buf[kem_ctx_len..][0..pk_len], pk_s[0..pk_len]);
+            kem_ctx_len += pk_len;
+        }
+
+        const shared_secret_arr = kemExtractAndExpand(self.suite, dh[0..dh_len], kem_ctx_buf[0..kem_ctx_len]);
+        return try keySchedule(self.suite, mode, shared_secret_arr[0..n], info, psk, psk_id, pk_e[0..pk_e_len]);
+    }
+
+    fn senderSetupCore(self: *const Hpke, pk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, sk_s: ?[]const u8, io: std.Io) SetupError!SenderResult {
+        var seed: [max_secret_key_length]u8 = undefined;
+        io.random(seed[0..self.suite.secret_key_length]);
+        const kp_e = self.deriveKeyPair(seed[0..self.suite.secret_key_length]);
+        return self.senderSetupDeterministicCore(pk_r, info, mode, psk, psk_id, kp_e.sk[0..self.suite.secret_key_length], sk_s);
+    }
+
+    fn recipientSetupCore(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, pk_s: ?[]const u8) SetupError!RecipientContext {
+        const pk_r_arr = try publicKeyFromSecret(self.suite.kem, sk_r);
+        const pk_r_len = self.suite.public_key_length;
+
+        var dh: [max_shared_length]u8 = undefined;
+        const dh1 = try dhCompute(self.suite.kem, sk_r, enc);
+        const n = self.suite.kem.nSecret();
+        @memcpy(dh[0..n], dh1[0..n]);
+
+        var dh_len: usize = n;
+        var kem_ctx_buf: [3 * max_public_key_length]u8 = undefined;
+        @memcpy(kem_ctx_buf[0..enc.len], enc);
+        @memcpy(kem_ctx_buf[enc.len..][0..pk_r_len], pk_r_arr[0..pk_r_len]);
+        var kem_ctx_len: usize = enc.len + pk_r_len;
+
+        if (mode == .auth or mode == .auth_psk) {
+            const pks = pk_s orelse return error.WeakParameters;
+            const dh2 = try dhCompute(self.suite.kem, sk_r, pks);
+            @memcpy(dh[n..][0..n], dh2[0..n]);
+            dh_len += n;
+            @memcpy(kem_ctx_buf[kem_ctx_len..][0..pks.len], pks);
+            kem_ctx_len += pks.len;
+        }
+
+        const shared_secret_arr = kemExtractAndExpand(self.suite, dh[0..dh_len], kem_ctx_buf[0..kem_ctx_len]);
+        return try keyScheduleImpl(RecipientContext, self.suite, mode, shared_secret_arr[0..n], info, psk, psk_id);
+    }
+
+    fn publicKeyFromSecret(kem: KemId, sk: []const u8) SetupError![max_public_key_length]u8 {
+        var pk: [max_public_key_length]u8 = undefined;
+        switch (kem) {
+            .x25519_sha256 => {
+                if (sk.len != 32) return error.InvalidEncoding;
+                const pk_32 = try crypto.dh.X25519.recoverPublicKey(sk[0..32].*);
+                @memcpy(pk[0..32], &pk_32);
+            },
+            inline .p256_sha256, .p384_sha384 => |tag| {
+                const Curve = tag.NistCurve();
+                const n = comptime tag.nSecret();
+                if (sk.len != n) return error.InvalidEncoding;
+                const pk_point = try Curve.basePoint.mul(sk[0..n].*, .big);
+                const pk_bytes = pk_point.toUncompressedSec1();
+                @memcpy(pk[0 .. 1 + 2 * n], &pk_bytes);
+            },
+        }
+        return pk;
+    }
+
+    fn dhCompute(kem: KemId, sk: []const u8, pk: []const u8) SetupError![max_shared_length]u8 {
+        var dh: [max_shared_length]u8 = undefined;
+        switch (kem) {
+            .x25519_sha256 => {
+                if (sk.len != 32 or pk.len != 32) return error.InvalidEncoding;
+                const result = try crypto.dh.X25519.scalarmult(sk[0..32].*, pk[0..32].*);
+                @memcpy(dh[0..32], &result);
+            },
+            inline .p256_sha256, .p384_sha384 => |tag| {
+                const Curve = tag.NistCurve();
+                const n = comptime tag.nSecret();
+                if (sk.len != n) return error.InvalidEncoding;
+                if (pk.len != 1 + 2 * n or pk[0] != 0x04) return error.WeakPublicKey;
+                const pk_point = try Curve.fromSec1(pk);
+                const shared_point = try pk_point.mul(sk[0..n].*, .big);
+                const shared_x = shared_point.affineCoordinates().x.toBytes(.big);
+                @memcpy(dh[0..n], &shared_x);
+            },
+        }
+        return dh;
+    }
+
+    fn keySchedule(suite: CipherSuite, mode: Mode, shared_secret: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, enc: []const u8) SetupError!SenderResult {
+        var result = SenderResult{
+            .enc = @as([max_enc_length]u8, @splat(0)),
+            .enc_length = enc.len,
+            .ctx = try keyScheduleImpl(SenderContext, suite, mode, shared_secret, info, psk, psk_id),
+        };
+        @memcpy(result.enc[0..enc.len], enc);
+        return result;
+    }
+
+    fn verifyPskInputs(mode: Mode, psk: []const u8, psk_id: []const u8) crypto.errors.WeakParametersError!void {
+        const got_psk = psk.len > 0;
+        const got_psk_id = psk_id.len > 0;
+        if (got_psk != got_psk_id) return error.WeakParameters;
+        if (got_psk and (mode == .base or mode == .auth)) return error.WeakParameters;
+        if (!got_psk and (mode == .psk or mode == .auth_psk)) return error.WeakParameters;
+    }
+
+    fn keyScheduleImpl(comptime Ctx: type, suite: CipherSuite, mode: Mode, shared_secret: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8) SetupError!Ctx {
+        try verifyPskInputs(mode, psk, psk_id);
+        const suite_id = suite.makeSuiteId();
+
+        var psk_id_hash: [max_hash_length]u8 = undefined;
+        labeledExtract(suite.kdf, "", "psk_id_hash", psk_id, &suite_id, psk_id_hash[0..suite.hash_length]);
+
+        var info_hash: [max_hash_length]u8 = undefined;
+        labeledExtract(suite.kdf, "", "info_hash", info, &suite_id, info_hash[0..suite.hash_length]);
+
+        var ks_context: [1 + 2 * max_hash_length]u8 = undefined;
+        ks_context[0] = @intFromEnum(mode);
+        @memcpy(ks_context[1..][0..suite.hash_length], psk_id_hash[0..suite.hash_length]);
+        @memcpy(ks_context[1 + suite.hash_length ..][0..suite.hash_length], info_hash[0..suite.hash_length]);
+
+        var secret: [max_hash_length]u8 = undefined;
+        labeledExtract(suite.kdf, shared_secret, "secret", psk, &suite_id, secret[0..suite.hash_length]);
+
+        var ctx = Ctx{
             .suite = suite,
-            .exporter_secret = exporter_secret,
-            .outbound_state = outbound_state,
+            .key = @as([max_key_length]u8, @splat(0)),
+            .base_nonce = @as([max_nonce_length]u8, @splat(0)),
+            .sequence = 0,
+            .exporter_secret = @as([max_hash_length]u8, @splat(0)),
         };
+
+        const ks_ctx = ks_context[0 .. 1 + 2 * suite.hash_length];
+        labeledExpand(suite.kdf, secret[0..suite.hash_length], "key", ks_ctx, &suite_id, ctx.key[0..suite.key_length]);
+        labeledExpand(suite.kdf, secret[0..suite.hash_length], "base_nonce", ks_ctx, &suite_id, ctx.base_nonce[0..suite.nonce_length]);
+        labeledExpand(suite.kdf, secret[0..suite.hash_length], "exp", ks_ctx, &suite_id, ctx.exporter_secret[0..suite.hash_length]);
+
+        return ctx;
     }
 
-    /// Create a new key pair
-    pub fn generateKeyPair(suite: Suite, io: std.Io) !KeyPair {
-        return suite.kem.generateKeyPairFn(io);
-    }
+    fn kemExtractAndExpand(suite: CipherSuite, dh: []const u8, kem_context: []const u8) [max_shared_length]u8 {
+        var kem_suite_id: [5]u8 = undefined;
+        @memcpy(kem_suite_id[0..3], "KEM");
+        mem.writeInt(u16, kem_suite_id[3..5], @intFromEnum(suite.kem), .big);
 
-    /// Create a new deterministic key pair
-    pub fn deterministicKeyPair(suite: Suite, seed: []const u8) !KeyPair {
-        const prk = try suite.labeledExtract(&suite.id.kem, null, "dkp_prk", seed);
-        var secret_key = try BoundedArray(u8, max_secret_key_length).init(suite.kem.secret_length);
-        try suite.labeledExpand(secret_key.slice(), &suite.id.kem, prk, "sk", null);
-        return suite.kem.deterministicKeyPairFn(secret_key.constSlice());
-    }
+        const kem_kdf = suite.kem.kdf();
+        const kem_hash_len = suite.kem.nSecret();
 
-    fn extractAndExpandDh(suite: Suite, dh: []const u8, kem_ctx: []const u8) !BoundedArray(u8, max_shared_key_length) {
-        const prk = try suite.labeledExtract(&suite.id.kem, null, "eae_prk", dh);
-        var dh_secret = try BoundedArray(u8, max_digest_length).init(suite.kem.shared_length);
-        try suite.labeledExpand(dh_secret.slice(), &suite.id.kem, prk, "shared_secret", kem_ctx);
-        return dh_secret;
-    }
+        var prk: [max_hash_length]u8 = undefined;
+        labeledExtract(kem_kdf, "", "eae_prk", dh, &kem_suite_id, prk[0..kem_hash_len]);
 
-    /// A secret, and an encapsulated (encrypted) representation of it
-    pub const EncapsulatedSecret = struct {
-        secret: BoundedArray(u8, max_digest_length),
-        encapsulated: BoundedArray(u8, max_public_key_length),
+        var shared_secret: [max_shared_length]u8 = undefined;
+        labeledExpand(kem_kdf, prk[0..kem_hash_len], "shared_secret", kem_context, &kem_suite_id, shared_secret[0..kem_hash_len]);
+        return shared_secret;
+    }
+};
+
+/// Convert a suite ID from wire format (e.g., from a TLS handshake).
+pub fn parseSuiteId(bytes: [2]u8) ?CipherSuiteId {
+    return std.enums.fromInt(CipherSuiteId, mem.readInt(u16, &bytes, .big));
+}
+
+/// Serialize a suite ID to wire format.
+pub fn serializeSuiteId(suite: CipherSuiteId) [2]u8 {
+    var bytes: [2]u8 = undefined;
+    mem.writeInt(u16, &bytes, @intFromEnum(suite), .big);
+    return bytes;
+}
+
+fn labeledExtract(kdf_id: KdfId, salt: []const u8, comptime label: []const u8, ikm: []const u8, suite_id: []const u8, out: []u8) void {
+    assert(suite_id.len <= 10);
+    switch (kdf_id) {
+        inline else => |tag| hkdfExtractLabeled(tag.Hmac(), salt, label, ikm, suite_id, out),
+    }
+}
+
+fn labeledExpand(kdf_id: KdfId, prk: []const u8, comptime label: []const u8, info: []const u8, suite_id: []const u8, out: []u8) void {
+    assert(suite_id.len <= 10);
+    assert(out.len <= maxExpandLength(kdf_id));
+    switch (kdf_id) {
+        inline else => |tag| hkdfExpandLabeled(tag.Hmac(), prk, label, info, suite_id, out),
+    }
+}
+
+fn maxExpandLength(kdf_id: KdfId) usize {
+    return switch (kdf_id) {
+        inline else => |tag| 255 * tag.Hmac().mac_length,
     };
+}
 
-    /// Generate a secret, return it as well as its encapsulation
-    pub fn encap(suite: Suite, server_pk: []const u8, seed: ?[]const u8, io: std.Io) !EncapsulatedSecret {
-        var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair(io);
-        var dh = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh.slice(), server_pk, eph_kp.secret_key.slice());
-        var buffer: [max_public_key_length + max_public_key_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        kem_ctx.appendSliceAssumeCapacity(eph_kp.public_key.constSlice());
-        kem_ctx.appendSliceAssumeCapacity(server_pk);
-        const dh_secret = try suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
-        return EncapsulatedSecret{
-            .secret = dh_secret,
-            .encapsulated = eph_kp.public_key,
-        };
+fn hkdfExtractLabeled(comptime Hmac: type, salt: []const u8, comptime label: []const u8, ikm: []const u8, suite_id: []const u8, out: []u8) void {
+    assert(out.len == Hmac.mac_length);
+
+    var mac = Hmac.init(salt);
+    mac.update("HPKE-v1");
+    mac.update(suite_id);
+    mac.update(label);
+    mac.update(ikm);
+
+    var prk: [Hmac.mac_length]u8 = undefined;
+    mac.final(&prk);
+    @memcpy(out, &prk);
+}
+
+fn hkdfExpandLabeled(comptime Hmac: type, prk: []const u8, comptime label: []const u8, info: []const u8, suite_id: []const u8, out: []u8) void {
+    assert(prk.len == Hmac.mac_length);
+    assert(out.len <= 255 * Hmac.mac_length);
+
+    var labeled_length: [2]u8 = undefined;
+    mem.writeInt(u16, &labeled_length, @intCast(out.len), .big);
+
+    var counter: u8 = 1;
+    var out_offset: usize = 0;
+    var prev: [Hmac.mac_length]u8 = undefined;
+    var first = true;
+
+    while (out_offset < out.len) : (counter += 1) {
+        var mac = Hmac.init(prk);
+        if (!first) mac.update(&prev);
+        mac.update(&labeled_length);
+        mac.update("HPKE-v1");
+        mac.update(suite_id);
+        mac.update(label);
+        mac.update(info);
+        mac.update(&[_]u8{counter});
+        mac.final(&prev);
+
+        const copy_len = @min(Hmac.mac_length, out.len - out_offset);
+        @memcpy(out[out_offset..][0..copy_len], prev[0..copy_len]);
+        out_offset += copy_len;
+        first = false;
     }
-
-    /// Generate a secret, return it as well as its encapsulation, with authentication support
-    pub fn authEncap(suite: Suite, server_pk: []const u8, client_kp: KeyPair, seed: ?[]const u8, io: std.Io) !EncapsulatedSecret {
-        var eph_kp = if (seed) |s| try suite.deterministicKeyPair(s) else try suite.generateKeyPair(io);
-        var dh1 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh1.slice(), server_pk, eph_kp.secret_key.constSlice());
-        var dh2 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh2.slice(), server_pk, client_kp.secret_key.constSlice());
-        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
-        @memcpy(dh.slice()[0..dh1.len], dh1.constSlice());
-        @memcpy(dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
-        var buffer: [3 * max_public_key_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        kem_ctx.appendSliceAssumeCapacity(eph_kp.public_key.constSlice());
-        kem_ctx.appendSliceAssumeCapacity(server_pk);
-        kem_ctx.appendSliceAssumeCapacity(client_kp.public_key.constSlice());
-        const dh_secret = try suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
-        return EncapsulatedSecret{
-            .secret = dh_secret,
-            .encapsulated = eph_kp.public_key,
-        };
-    }
-
-    /// Decapsulate a secret
-    pub fn decap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair) !BoundedArray(u8, max_shared_key_length) {
-        var dh = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh.slice(), eph_pk, server_kp.secret_key.constSlice());
-        var buffer: [2 * max_public_key_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        kem_ctx.appendSliceAssumeCapacity(eph_pk);
-        kem_ctx.appendSliceAssumeCapacity(server_kp.public_key.constSlice());
-        return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
-    }
-
-    /// Authenticate a client using its public key and decapsulate a secret
-    pub fn authDecap(suite: Suite, eph_pk: []const u8, server_kp: KeyPair, client_pk: []const u8) !BoundedArray(u8, max_shared_key_length) {
-        var dh1 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh1.slice(), eph_pk, server_kp.secret_key.constSlice());
-        var dh2 = try BoundedArray(u8, max_shared_key_length).init(suite.kem.shared_length);
-        try suite.kem.dhFn(dh2.slice(), client_pk, server_kp.secret_key.constSlice());
-        var dh = try BoundedArray(u8, 2 * max_shared_key_length).init(dh1.len + dh2.len);
-        @memcpy(dh.slice()[0..dh1.len], dh1.constSlice());
-        @memcpy(dh.slice()[dh1.len..][0..dh2.len], dh2.constSlice());
-        var buffer: [3 * max_public_key_length]u8 = undefined;
-        var alloc = FixedBufferAllocator.init(&buffer);
-        var kem_ctx = try ArrayList(u8).initCapacity(alloc.allocator(), alloc.buffer.len);
-        kem_ctx.appendSliceAssumeCapacity(eph_pk);
-        kem_ctx.appendSliceAssumeCapacity(server_kp.public_key.constSlice());
-        kem_ctx.appendSliceAssumeCapacity(client_pk);
-        return suite.extractAndExpandDh(dh.constSlice(), kem_ctx.items);
-    }
-
-    /// A client context as well as an encapsulated secret
-    pub const ClientContextAndEncapsulatedSecret = struct {
-        client_ctx: ClientContext,
-        encapsulated_secret: EncapsulatedSecret,
-    };
-
-    /// Create a new client context
-    pub fn createClientContext(suite: Suite, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8, io: std.Io) !ClientContextAndEncapsulatedSecret {
-        const encapsulated_secret = try suite.encap(server_pk, seed, io);
-        const mode: Mode = if (psk) |_| .psk else .base;
-        const inner_ctx = try suite.keySchedule(mode, encapsulated_secret.secret.constSlice(), info, psk);
-        const client_ctx = ClientContext{ .ctx = inner_ctx };
-        return ClientContextAndEncapsulatedSecret{
-            .client_ctx = client_ctx,
-            .encapsulated_secret = encapsulated_secret,
-        };
-    }
-
-    /// Create a new client authenticated context
-    pub fn createAuthenticatedClientContext(suite: Suite, client_kp: KeyPair, server_pk: []const u8, info: []const u8, psk: ?Psk, seed: ?[]const u8, io: std.Io) !ClientContextAndEncapsulatedSecret {
-        const encapsulated_secret = try suite.authEncap(server_pk, client_kp, seed, io);
-        const mode: Mode = if (psk) |_| .authPsk else .auth;
-        const inner_ctx = try suite.keySchedule(mode, encapsulated_secret.secret.constSlice(), info, psk);
-        const client_ctx = ClientContext{ .ctx = inner_ctx };
-        return ClientContextAndEncapsulatedSecret{
-            .client_ctx = client_ctx,
-            .encapsulated_secret = encapsulated_secret,
-        };
-    }
-
-    /// Create a new server context
-    pub fn createServerContext(suite: Suite, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
-        const dh_secret = try suite.decap(encapsulated_secret, server_kp);
-        const mode: Mode = if (psk) |_| .psk else .base;
-        const inner_ctx = try suite.keySchedule(mode, dh_secret.constSlice(), info, psk);
-        return ServerContext{ .ctx = inner_ctx };
-    }
-
-    /// Create a new authenticated server context
-    pub fn createAuthenticatedServerContext(suite: Suite, client_pk: []const u8, encapsulated_secret: []const u8, server_kp: KeyPair, info: []const u8, psk: ?Psk) !ServerContext {
-        const dh_secret = try suite.authDecap(encapsulated_secret, server_kp, client_pk);
-        const mode: Mode = if (psk) |_| .authPsk else .auth;
-        const inner_ctx = try suite.keySchedule(mode, dh_secret.constSlice(), info, psk);
-        return ServerContext{ .ctx = inner_ctx };
-    }
-};
-
-const Context = struct {
-    suite: Suite,
-    exporter_secret: BoundedArray(u8, max_prk_length),
-    inbound_state: ?primitives.Aead.State = null,
-    outbound_state: ?primitives.Aead.State = null,
-
-    fn exportSecret(ctx: Context, out: []u8, exporter_context: []const u8) !void {
-        try ctx.suite.labeledExpand(out, &ctx.suite.id.context, ctx.exporter_secret, "sec", exporter_context);
-    }
-
-    fn responseState(ctx: Context) !primitives.Aead.State {
-        var inbound_key = try BoundedArray(u8, max_aead_key_length).init(ctx.suite.aead.?.key_length);
-        var inbound_base_nonce = try BoundedArray(u8, max_aead_nonce_length).init(ctx.suite.aead.?.nonce_length);
-        try ctx.exportSecret(inbound_key.slice(), "response key");
-        try ctx.exportSecret(inbound_base_nonce.slice(), "response nonce");
-        return ctx.suite.aead.?.newStateFn(inbound_key.constSlice(), inbound_base_nonce.constSlice());
-    }
-};
-
-/// A client context
-pub const ClientContext = struct {
-    ctx: Context,
-
-    /// Encrypt a message for the server
-    pub fn encryptToServer(client_context: *ClientContext, ciphertext: []u8, message: []const u8, ad: []const u8) void {
-        const required_ciphertext_length = client_context.ctx.suite.aead.?.tag_length + message.len;
-        debug.assert(ciphertext.len == required_ciphertext_length);
-        var state = &client_context.ctx.outbound_state.?;
-        const nonce = state.nextNonce();
-        state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
-    }
-
-    /// Decrypt a response from the server
-    pub fn decryptFromServer(client_context: *ClientContext, message: []u8, ciphertext: []const u8, ad: []const u8) !void {
-        if (client_context.ctx.inbound_state == null) {
-            client_context.ctx.inbound_state = client_context.ctx.responseState() catch unreachable;
-        }
-        const required_ciphertext_length = client_context.ctx.suite.aead.?.tag_length + message.len;
-        debug.assert(ciphertext.len == required_ciphertext_length);
-        var state = &client_context.ctx.inbound_state.?;
-        const nonce = state.nextNonce();
-        try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
-    }
-
-    /// Return the exporter secret
-    pub fn exporterSecret(client_context: ClientContext) BoundedArray(u8, max_prk_length) {
-        return client_context.ctx.exporter_secret;
-    }
-
-    /// Derive an arbitrary-long secret
-    pub fn exportSecret(client_context: ClientContext, out: []u8, info: []const u8) !void {
-        try client_context.ctx.exportSecret(out, info);
-    }
-
-    /// Return the tag length
-    pub fn tagLength(client_context: ClientContext) usize {
-        return client_context.ctx.suite.aead.?.tag_length;
-    }
-};
-
-/// A server context
-pub const ServerContext = struct {
-    ctx: Context,
-
-    /// Decrypt a ciphertext received from the client
-    pub fn decryptFromClient(server_context: *ServerContext, message: []u8, ciphertext: []const u8, ad: []const u8) !void {
-        const required_ciphertext_length = server_context.ctx.suite.aead.?.tag_length + message.len;
-        debug.assert(ciphertext.len == required_ciphertext_length);
-        var state = &server_context.ctx.outbound_state.?;
-        const nonce = state.nextNonce();
-        try state.decryptFn(message, ciphertext, ad, nonce.constSlice(), state.key.constSlice());
-    }
-
-    /// Encrypt a response to the client
-    pub fn encryptToClient(server_context: *ServerContext, ciphertext: []u8, message: []const u8, ad: []const u8) void {
-        if (server_context.ctx.inbound_state == null) {
-            server_context.ctx.inbound_state = server_context.ctx.responseState() catch unreachable;
-        }
-        const required_ciphertext_length = server_context.ctx.suite.aead.?.tag_length + message.len;
-        debug.assert(ciphertext.len == required_ciphertext_length);
-        var state = &server_context.ctx.inbound_state.?;
-        const nonce = state.nextNonce();
-        state.encryptFn(ciphertext, message, ad, nonce.constSlice(), state.key.constSlice());
-    }
-
-    /// Return the exporter secret
-    pub fn exporterSecret(server_context: ServerContext) BoundedArray(u8, max_prk_length) {
-        return server_context.ctx.exporter_secret;
-    }
-
-    /// Derive an arbitrary-long secret
-    pub fn exportSecret(server_context: ServerContext, out: []u8, info: []const u8) !void {
-        try server_context.ctx.exportSecret(out, info);
-    }
-
-    /// Return the tag length
-    pub fn tagLength(server_context: ServerContext) usize {
-        return server_context.ctx.suite.aead.?.tag_length;
-    }
-};
+}

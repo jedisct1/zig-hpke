@@ -4,12 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const bounded_array = b.dependency("bounded_array", .{});
-
     const hpke = b.addModule("hpke", .{
         .root_source_file = b.path("src/main.zig"),
     });
-    hpke.addImport("bounded_array", bounded_array.module("bounded_array"));
 
     const main_tests = b.addTest(.{
         .root_module = b.createModule(.{

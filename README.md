@@ -1,131 +1,126 @@
 # HPKE for Zig
 
-`zig-hpke` is an implementation of the [Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html) (HPKE) scheme.
+A Zig implementation of [Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html) (HPKE, RFC 9180).
+
+Supports X25519, P-256, and P-384 KEMs with HKDF-SHA256/384/512 and AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 AEADs. All four modes are available: base, PSK, auth, and auth+PSK.
 
 ## Usage
 
-### Bounded arrays
+### Creating an HPKE instance
 
-This code heavily relies on the `BoundedArray` type: a type to store small, variable-sized slices whose maximum size is known.
-
-Keys are typically represented using that type, whose raw slice can be accessed with the `constSlice()` function (for a constant slice), or `slice()` (for a mutable slice).
-
-### Suite instantiation
+Pick a cipher suite and create an `Hpke` instance:
 
 ```zig
-const suite = try Suite.init(
-    primitives.Kem.X25519HkdfSha256.id,
-    primitives.Kdf.HkdfSha256.id,
-    primitives.Aead.Aes128Gcm.id,
+const hpke = @import("hpke");
+
+const h = hpke.Hpke.init(.x25519_hkdf_sha256_aes128_gcm);
+```
+
+Other supported suites include `.p256_hkdf_sha256_aes128_gcm`, `.p384_hkdf_sha384_aes256_gcm`, `.x25519_hkdf_sha256_chacha20_poly1305`, and more.
+
+See `CipherSuiteId` for the full list.
+
+### Generating a key pair
+
+Using `deriveKeyPair` (deterministic, from a seed):
+
+```zig
+var seed: [32]u8 = undefined;
+io.random(&seed);
+const kp = h.deriveKeyPair(&seed);
+const sk_r = kp.sk[0..32];
+const pk_r = kp.pk[0..32];
+```
+
+Or directly for X25519:
+
+```zig
+var sk_r: [32]u8 = undefined;
+io.random(&sk_r);
+const pk_r = try std.crypto.dh.X25519.recoverPublicKey(sk_r);
+```
+
+### Sender: encrypt a message
+
+The sender creates a context using the recipient's public key. This produces an encapsulated key (`enc`) that must be sent alongside any ciphertexts.
+
+```zig
+var sender = try h.senderSetup(&pk_r, "info", io);
+
+const plaintext = "Hello, HPKE!";
+var ciphertext: [plaintext.len + 16]u8 = undefined;
+try sender.ctx.seal(&ciphertext, plaintext, "associated data");
+```
+
+Send `sender.enc[0..sender.enc_length]` and `ciphertext` to the recipient.
+
+Nonces are incremented automatically, so `seal` can be called multiple times on the same context. The ciphertext is 16 bytes (the AEAD tag) longer than the plaintext.
+
+### Recipient: decrypt a message
+
+The recipient reconstructs the context from the encapsulated key and their secret key:
+
+```zig
+var recipient = try h.recipientSetup(enc, &sk_r, "info");
+
+var decrypted: [plaintext.len]u8 = undefined;
+try recipient.open(&decrypted, &ciphertext, "associated data");
+```
+
+Sender and recipient use distinct types (`SenderContext` and `RecipientContext`), so calling `seal` on a recipient or `open` on a sender is a compile error.
+
+### PSK mode
+
+Both sender and recipient can use a pre-shared key for additional authentication:
+
+```zig
+var sender = try h.senderSetupPSK(&pk_r, "info", "my-psk", "psk-id", io);
+var recipient = try h.recipientSetupPSK(enc, &sk_r, "info", "my-psk", "psk-id");
+```
+
+### Auth mode
+
+The sender authenticates with their own secret key:
+
+```zig
+var sender = try h.senderSetupAuth(&pk_r, "info", &sk_s, io);
+var recipient = try h.recipientSetupAuth(enc, &sk_r, "info", &pk_s);
+```
+
+Auth+PSK combines both:
+
+```zig
+var sender = try h.senderSetupAuthPSK(&pk_r, "info", "my-psk", "psk-id", &sk_s, io);
+var recipient = try h.recipientSetupAuthPSK(enc, &sk_r, "info", "my-psk", "psk-id", &pk_s);
+```
+
+### Export secrets
+
+Both sender and recipient contexts can derive export secrets:
+
+```zig
+var secret: [32]u8 = undefined;
+sender.ctx.exportSecret(&secret, "label");
+recipient.exportSecret(&secret, "label");
+```
+
+The `export_only` suites (e.g. `.x25519_hkdf_sha256_export_only`) only support `exportSecret` -- `seal` and `open` return `error.ExportOnlyMode`.
+
+### Wire format helpers
+
+Serialize and parse cipher suite IDs for use in protocols like TLS:
+
+```zig
+const bytes = hpke.serializeSuiteId(.x25519_hkdf_sha256_aes128_gcm);
+const suite_id = hpke.parseSuiteId(bytes);
+```
+
+### Building a suite from components
+
+```zig
+const suite_id = hpke.CipherSuiteId.fromComponents(
+    .x25519_sha256,
+    .hkdf_sha256,
+    .aes128_gcm,
 );
 ```
-
-### Key pair creation
-
-```zig
-const kp = try suite.generateKeyPair();
-```
-
-### Client: creation and encapsulation of the shared secret
-
-A _client_ initiates a connexion by sending an encrypted secret; a _server_ accepts an encrypted secret from a client, and decrypts it, so that both parties can eventually agree on a shared secret.
-
-```zig
-var client_ctx_and_encapsulated_secret =
-    try suite.createClientContext(server_kp.public_key.slice(), "info", null, null);
-
-var client_ctx = client_ctx_and_encapsulated_secret.client_ctx;
-
-var encapsulated_secret = client_ctx_and_encapsulated_secret.encapsulated_secret;
-```
-
-* `encapsulated_secret.encapsulated` needs to be sent to the server. `encapsulated_secret.encapsulated.secret` must remain secret.
-* `client_ctx` can be used to encrypt/decrypt messages exchanged with the server.
-
-To improve misuse resistance, this implementation uses distinct types for the client and the server context: `ClientContext` for the client, and `ServerContext` for the server.
-
-### Server: decapsulation of the shared secret
-
-```zig
-var server_ctx =
-    try suite.createServerContext(encapsulated_secret.encapsulated.constSlice(), server_kp, "info", null);
-```
-
-* `server_ctx` can be used to encrypt/decrypt messages exchanged with the client
-* The last parameter is an optional pre-shared key.
-
-### Encryption of a message from the client to the server
-
-A message can be encrypted by the client for the server:
-
-```zig
-client_ctx.encryptToServer(&ciphertext, message, ad);
-```
-
-Nonces are automatically incremented, so it is safe to call this function multiple times within the same context.
-
-Last parameter is optional associated data.
-
-The ciphertext is `client_ctx.tagLength()` bytes larger than the message.
-
-### Decryption of a ciphertext received by the server
-
-The server can decrypt a ciphertext sent by the client:
-
-```zig
-var message2: [message.len]u8 = undefined;
-try server_ctx.decryptFromClient(&message2, &ciphertext, ad);
-```
-
-Last parameter is optional associated data. The message length is `server_ctx.tagLength()` bytes shorter than the ciphertext.
-
-### Encryption of a message from the server to the client
-
-A message can also be encrypted by the server for the client:
-
-```zig
-server_ctx.encryptToClient(&ciphertext, message, ad);
-```
-
-Nonces are automatically incremented, so it is safe to call this function multiple times within the same context.
-
-Last parameter is optional associated data.
-
-### Decryption of a ciphertext received by the client
-
-The client can decrypt an encrypted response from the server:
-
-```zig
-try client_ctx.decryptFromServer(&message2, &ciphertext, ad);
-```
-
-Last parameter is optional associated data.
-
-## Authenticated modes
-
-Authenticated modes, with or without a PSK are supported.
-
-See `createAuthenticatedClientContext` and `createAuthenticatedServerContext`.
-
-### Exporter secret
-
-The exporter secret can be obtained with the `exportedSecret()` function available both in the `ServerContext` and `ClientContext` structures:
-
-```zig
-const exporter = client_ctx.exporterSecret().constSlice();
-```
-
-### Key derivation
-
-```zig
-const secret1 = try client_ctx.exportSecret("description 1")
-const secret2 = try server_ctx.exportSecret("description 2");
-```
-
-### Access the raw cipher interface
-
-```zig
-const aead = suite.aead;
-```
-
-## That's it!
