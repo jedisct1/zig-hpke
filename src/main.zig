@@ -12,12 +12,14 @@ pub const KemId = enum(u16) {
     p256_sha256 = 0x0010,
     p384_sha384 = 0x0011,
     x25519_sha256 = 0x0020,
+    xwing = 0x647a, // ML-KEM-768 + X25519 hybrid
 
     /// Returns the KDF naturally paired with this KEM.
     pub fn kdf(self: KemId) KdfId {
         return switch (self) {
             .x25519_sha256, .p256_sha256 => .hkdf_sha256,
             .p384_sha384 => .hkdf_sha384,
+            .xwing => .hkdf_sha256,
         };
     }
 
@@ -26,6 +28,7 @@ pub const KemId = enum(u16) {
         return switch (self) {
             .x25519_sha256, .p256_sha256 => 32,
             .p384_sha384 => 48,
+            .xwing => 32,
         };
     }
 
@@ -33,7 +36,7 @@ pub const KemId = enum(u16) {
         return switch (self) {
             .p256_sha256 => crypto.ecc.P256,
             .p384_sha384 => crypto.ecc.P384,
-            .x25519_sha256 => @compileError("X25519 is not a NIST curve"),
+            .x25519_sha256, .xwing => @compileError("not a NIST curve"),
         };
     }
 };
@@ -83,6 +86,7 @@ pub const CipherSuiteId = enum(u16) {
     p256_hkdf_sha256_chacha20_poly1305 = 0x0103,
     p384_hkdf_sha384_aes256_gcm = 0x0202,
     p384_hkdf_sha384_chacha20_poly1305 = 0x0203,
+    xwing_hkdf_sha256_aes128_gcm = 0x0301,
 
     const Components = struct { kem: KemId, kdf: KdfId, aead: AeadId };
 
@@ -98,6 +102,7 @@ pub const CipherSuiteId = enum(u16) {
         .p256_hkdf_sha256_chacha20_poly1305 = .{ .kem = .p256_sha256, .kdf = .hkdf_sha256, .aead = .chacha20_poly1305 },
         .p384_hkdf_sha384_aes256_gcm = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
         .p384_hkdf_sha384_chacha20_poly1305 = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .chacha20_poly1305 },
+        .xwing_hkdf_sha256_aes128_gcm = .{ .kem = .xwing, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
     });
 
     /// Looks up the suite ID for a given KEM/KDF/AEAD triple, or null if unsupported.
@@ -120,9 +125,9 @@ const max_hash_length = 64;
 const max_key_length = 32;
 const max_nonce_length = 12;
 const max_tag_length = 16;
-const max_enc_length = 97;
-const max_public_key_length = 97;
-const max_secret_key_length = 48;
+const max_enc_length = 1120; // X-Wing ciphertext length (largest)
+const max_public_key_length = 1216; // X-Wing public key length (largest)
+const max_secret_key_length = 64; // Largest secret key or seed (X-Wing ephemeral seed is 64 bytes)
 const max_shared_length = 96; // 2x for auth mode dual-DH
 
 /// Resolved parameters for a given `CipherSuiteId` -- key lengths, hash sizes, etc.
@@ -146,6 +151,11 @@ pub const CipherSuite = struct {
             .x25519_sha256 => .{ .pk = 32, .sk = 32, .enc = 32 },
             .p256_sha256 => .{ .pk = 65, .sk = 32, .enc = 65 },
             .p384_sha384 => .{ .pk = 97, .sk = 48, .enc = 97 },
+            .xwing => .{
+                .pk = 1216, // ML-KEM public (1184) + X25519 public (32)
+                .sk = 32, // seed for deterministic generation
+                .enc = 1120, // ML-KEM ciphertext (1088) + X25519 ephemeral public (32)
+            },
         };
 
         return .{
@@ -281,12 +291,14 @@ fn computeNonce(base: []const u8, seq: u64, nn: u16) [max_nonce_length]u8 {
     return nonce;
 }
 
+pub const OperationNotSupported = error{OperationNotSupported};
 pub const SetupError = crypto.errors.IdentityElementError ||
     crypto.errors.EncodingError ||
     crypto.errors.NonCanonicalError ||
     crypto.errors.NotSquareError ||
     crypto.errors.WeakPublicKeyError ||
-    crypto.errors.WeakParametersError;
+    crypto.errors.WeakParametersError ||
+    OperationNotSupported;
 
 /// Result of a sender setup: the encapsulated key and the encryption context.
 pub const SenderResult = struct {
@@ -386,11 +398,117 @@ pub const Hpke = struct {
                 const pk_bytes = pk_point.toUncompressedSec1();
                 @memcpy(pk[0 .. 1 + 2 * n], &pk_bytes);
             },
+            .xwing => {
+                // Expand the 32-byte seed to 64 bytes for ML-KEM key generation.
+                var seed_mlkem: [64]u8 = undefined;
+                @memcpy(seed_mlkem[0..32], seed[0..32]);
+                @memset(seed_mlkem[32..64], 0);
+                const kp_mlkem = try crypto.kem.ml_kem.MLKem768.KeyPair.generateDeterministic(seed_mlkem);
+                const pk_mlkem = kp_mlkem.public_key.toBytes();
+
+                // X25519 key pair from the same original seed (32 bytes).
+                var seed_x25519: [32]u8 = undefined;
+                @memcpy(&seed_x25519, seed[0..32]);
+                const kp_x25519 = crypto.dh.X25519.KeyPair.generateDeterministic(seed_x25519) catch unreachable;
+                const pk_x25519 = kp_x25519.public_key;
+
+                @memcpy(sk[0..32], seed);
+                @memcpy(pk[0..1184], &pk_mlkem);
+                @memcpy(pk[1184..1216], &pk_x25519);
+            },
         }
         return .{ .sk = sk, .pk = pk };
     }
 
+    // -----------------------------------------------------------------------------
+    // Hybrid KEM helpers (X-Wing)
+    // -----------------------------------------------------------------------------
+
+    fn hybridEncaps(pk_r: []const u8, seed: []const u8) !struct { enc: [max_enc_length]u8, shared: [32]u8 } {
+        // pk_r is concatenated public key: ML-KEM public (1184) + X25519 public (32)
+        if (pk_r.len != 1216) return error.InvalidEncoding;
+        if (seed.len != 64) return error.InvalidEncoding;
+
+        const pk_mlkem = pk_r[0..1184];
+        const pk_x25519 = pk_r[1184..1216];
+
+        // Extract the first 32 bytes for ML-KEM encapsulation.
+        var mlkem_seed: [32]u8 = undefined;
+        @memcpy(&mlkem_seed, seed[0..32]);
+
+        const mlkem_pk = try crypto.kem.ml_kem.MLKem768.PublicKey.fromBytes(pk_mlkem);
+        const encap = mlkem_pk.encapsDeterministic(&mlkem_seed);
+        const ss_mlkem = encap.shared_secret;
+        const enc_mlkem = encap.ciphertext;
+
+        // X25519 ephemeral from next 32 bytes of seed.
+        var seed_x25519: [32]u8 = undefined;
+        @memcpy(&seed_x25519, seed[32..64]);
+        const kp_x25519 = try crypto.dh.X25519.KeyPair.generateDeterministic(seed_x25519);
+        const pk_e_x25519 = kp_x25519.public_key;
+        const ss_x25519 = try crypto.dh.X25519.scalarmult(kp_x25519.secret_key, pk_x25519.*);
+
+        // Combine shared secrets and hash
+        var combined: [64]u8 = undefined;
+        @memcpy(combined[0..32], &ss_mlkem);
+        @memcpy(combined[32..64], &ss_x25519);
+        var shared: [32]u8 = undefined;
+        crypto.hash.sha3.Sha3_256.hash(&combined, &shared, .{});
+
+        // Build ciphertext: ML-KEM ciphertext (1088) + X25519 ephemeral public (32)
+        var enc: [max_enc_length]u8 = undefined;
+        @memcpy(enc[0..1088], &enc_mlkem);
+        @memcpy(enc[1088..1120], &pk_e_x25519);
+        return .{ .enc = enc, .shared = shared };
+    }
+
+    fn hybridDecaps(sk_r: []const u8, enc: []const u8) ![32]u8 {
+        // sk_r is the seed (32 bytes)
+        if (sk_r.len != 32) return error.InvalidEncoding;
+        if (enc.len != 1120) return error.InvalidEncoding;
+
+        const enc_mlkem = enc[0..1088];
+        const pk_e_x25519 = enc[1088..1120];
+
+        // Reconstruct ML-KEM static key pair from the 32-byte seed, expanded to 64 bytes.
+        var seed_mlkem: [64]u8 = undefined;
+        @memcpy(seed_mlkem[0..32], sk_r[0..32]);
+        @memset(seed_mlkem[32..64], 0);
+        const kp_mlkem = try crypto.kem.ml_kem.MLKem768.KeyPair.generateDeterministic(seed_mlkem);
+        const ss_mlkem = try kp_mlkem.secret_key.decaps(enc_mlkem);
+
+        // X25519 static key from the same seed.
+        var seed_x25519: [32]u8 = undefined;
+        @memcpy(&seed_x25519, sk_r[0..32]);
+        const kp_x25519 = try crypto.dh.X25519.KeyPair.generateDeterministic(seed_x25519);
+        const ss_x25519 = try crypto.dh.X25519.scalarmult(kp_x25519.secret_key, pk_e_x25519.*);
+
+        var combined: [64]u8 = undefined;
+        @memcpy(combined[0..32], &ss_mlkem);
+        @memcpy(combined[32..64], &ss_x25519);
+        var shared: [32]u8 = undefined;
+        crypto.hash.sha3.Sha3_256.hash(&combined, &shared, .{});
+        return shared;
+    }
+
     fn senderSetupDeterministicCore(self: *const Hpke, pk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, sk_e: []const u8, sk_s: ?[]const u8) SetupError!SenderResult {
+        // Hybrid KEMs
+        if (self.suite.kem == .xwing) {
+            if (mode == .auth or mode == .auth_psk) return error.OperationNotSupported;
+            const seed = sk_e[0..64];
+            const enc_result = try hybridEncaps(pk_r, seed);
+            const shared = enc_result.shared;
+            const ks = try keyScheduleImpl(SenderContext, self.suite, mode, shared[0..32], info, psk, psk_id);
+            var result = SenderResult{
+                .enc = @as([max_enc_length]u8, @splat(0)),
+                .enc_length = self.suite.enc_length,
+                .ctx = ks,
+            };
+            @memcpy(result.enc[0..self.suite.enc_length], enc_result.enc[0..self.suite.enc_length]);
+            return result;
+        }
+
+        // DH KEMs
         const pk_e = try publicKeyFromSecret(self.suite.kem, sk_e);
         const pk_e_len = self.suite.enc_length;
 
@@ -417,17 +535,40 @@ pub const Hpke = struct {
         }
 
         const shared_secret_arr = kemExtractAndExpand(self.suite, dh[0..dh_len], kem_ctx_buf[0..kem_ctx_len]);
-        return try keySchedule(self.suite, mode, shared_secret_arr[0..n], info, psk, psk_id, pk_e[0..pk_e_len]);
+        const ks = try keyScheduleImpl(SenderContext, self.suite, mode, shared_secret_arr[0..n], info, psk, psk_id);
+        var result = SenderResult{
+            .enc = @as([max_enc_length]u8, @splat(0)),
+            .enc_length = pk_e_len,
+            .ctx = ks,
+        };
+        @memcpy(result.enc[0..pk_e_len], pk_e[0..pk_e_len]);
+        return result;
     }
 
     fn senderSetupCore(self: *const Hpke, pk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, sk_s: ?[]const u8, io: std.Io) SetupError!SenderResult {
+        const seed_len = if (self.suite.kem == .xwing) 64 else self.suite.secret_key_length;
         var seed: [max_secret_key_length]u8 = undefined;
-        io.random(seed[0..self.suite.secret_key_length]);
+        io.random(seed[0..seed_len]);
+
+        if (self.suite.kem == .xwing) {
+            // For X-Wing, the full seed is the ephemeral secret.
+            return self.senderSetupDeterministicCore(pk_r, info, mode, psk, psk_id, seed[0..64], sk_s);
+        }
+
         const kp_e = self.deriveKeyPair(seed[0..self.suite.secret_key_length]);
         return self.senderSetupDeterministicCore(pk_r, info, mode, psk, psk_id, kp_e.sk[0..self.suite.secret_key_length], sk_s);
     }
 
     fn recipientSetupCore(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, pk_s: ?[]const u8) SetupError!RecipientContext {
+        // Hybrid KEMs
+        if (self.suite.kem == .xwing) {
+            // Auth modes are not supported X-Wing
+            if (mode == .auth or mode == .auth_psk) return error.OperationNotSupported;
+            const shared = try hybridDecaps(sk_r, enc);
+            return try keyScheduleImpl(RecipientContext, self.suite, mode, shared[0..32], info, psk, psk_id);
+        }
+
+        // DH KEMs
         const pk_r_arr = try publicKeyFromSecret(self.suite.kem, sk_r);
         const pk_r_len = self.suite.public_key_length;
 
@@ -471,6 +612,10 @@ pub const Hpke = struct {
                 const pk_bytes = pk_point.toUncompressedSec1();
                 @memcpy(pk[0 .. 1 + 2 * n], &pk_bytes);
             },
+            .xwing => {
+                // Not used for X-Wing (handled separately)
+                return error.OperationNotSupported;
+            },
         }
         return pk;
     }
@@ -493,21 +638,14 @@ pub const Hpke = struct {
                 const shared_x = shared_point.affineCoordinates().x.toBytes(.big);
                 @memcpy(dh[0..n], &shared_x);
             },
+            .xwing => {
+                return error.OperationNotSupported;
+            },
         }
         return dh;
     }
 
-    fn keySchedule(suite: CipherSuite, mode: Mode, shared_secret: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, enc: []const u8) SetupError!SenderResult {
-        var result = SenderResult{
-            .enc = @as([max_enc_length]u8, @splat(0)),
-            .enc_length = enc.len,
-            .ctx = try keyScheduleImpl(SenderContext, suite, mode, shared_secret, info, psk, psk_id),
-        };
-        @memcpy(result.enc[0..enc.len], enc);
-        return result;
-    }
-
-    fn verifyPskInputs(mode: Mode, psk: []const u8, psk_id: []const u8) crypto.errors.WeakParametersError!void {
+    fn verifyPskInputs(mode: Mode, psk: []const u8, psk_id: []const u8) SetupError!void {
         const got_psk = psk.len > 0;
         const got_psk_id = psk_id.len > 0;
         if (got_psk != got_psk_id) return error.WeakParameters;
