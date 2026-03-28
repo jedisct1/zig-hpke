@@ -303,6 +303,14 @@ pub const Hpke = struct {
         return .{ .suite = CipherSuite.init(suite_id) };
     }
 
+    pub fn publicKeyLength(self: *const Hpke) u16 {
+        return self.suite.public_key_length;
+    }
+
+    pub fn secretKeyLength(self: *const Hpke) u16 {
+        return self.suite.secret_key_length;
+    }
+
     pub fn senderSetup(self: *const Hpke, pk_r: []const u8, info: []const u8, io: std.Io) SetupError!SenderResult {
         return self.senderSetupCore(pk_r, info, .base, "", "", null, io);
     }
