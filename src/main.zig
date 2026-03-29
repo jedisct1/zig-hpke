@@ -26,12 +26,12 @@ pub const KemId = enum(u16) {
         };
     }
 
-    /// Returns the KDF naturally paired with this DHKEM.
-    pub fn kdf(self: KemId) KdfId {
+    /// Returns the KDF naturally paired with this DHKEM, or null for PQ KEMs.
+    pub fn kdf(self: KemId) ?KdfId {
         return switch (self) {
             .x25519_sha256, .p256_sha256 => .hkdf_sha256,
             .p384_sha384 => .hkdf_sha384,
-            else => unreachable,
+            else => null,
         };
     }
 
@@ -466,7 +466,7 @@ pub const Hpke = struct {
         var sk: [max_secret_key_length]u8 = @splat(0);
         var pk: [max_public_key_length]u8 = @splat(0);
 
-        const kem_kdf = self.suite.kem.kdf();
+        const kem_kdf = self.suite.kem.kdf().?;
         const n_secret = self.suite.kem.nSecret();
         var prk: [max_hash_length]u8 = undefined;
         labeledExtract(kem_kdf, "", "dkp_prk", seed, &kem_suite_id, prk[0..n_secret]);
@@ -657,7 +657,7 @@ pub const Hpke = struct {
                 @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
                 return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
             },
-            else => unreachable,
+            else => return error.InvalidEncoding,
         }
     }
 
@@ -682,7 +682,7 @@ pub const Hpke = struct {
                 @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
                 return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
             },
-            else => unreachable,
+            else => return error.InvalidEncoding,
         }
     }
 
@@ -706,7 +706,7 @@ pub const Hpke = struct {
                 const sk = Kem.SecretKey.fromBytes(sk_seed[0..nsk]);
                 return sk.decaps(enc[0..ct_len]) catch return error.InvalidEncoding;
             },
-            else => unreachable,
+            else => return error.InvalidEncoding,
         }
     }
 
@@ -762,7 +762,7 @@ pub const Hpke = struct {
                 const shared_x = shared_point.affineCoordinates().x.toBytes(.big);
                 @memcpy(dh[0..n], &shared_x);
             },
-            else => unreachable,
+            else => return error.InvalidEncoding,
         }
         return dh;
     }
@@ -881,7 +881,7 @@ pub const Hpke = struct {
     fn kemExtractAndExpand(suite: CipherSuite, dh: []const u8, kem_context: []const u8) [max_shared_length]u8 {
         const kem_suite_id = suite.kem.makeKemSuiteId();
 
-        const kem_kdf = suite.kem.kdf();
+        const kem_kdf = suite.kem.kdf().?;
         const kem_hash_len = suite.kem.nSecret();
 
         var prk: [max_hash_length]u8 = undefined;
