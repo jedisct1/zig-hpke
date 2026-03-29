@@ -87,6 +87,7 @@ pub const CipherSuiteId = enum(u16) {
     p384_hkdf_sha384_aes256_gcm = 0x0202,
     p384_hkdf_sha384_chacha20_poly1305 = 0x0203,
     xwing_hkdf_sha256_aes128_gcm = 0x0301,
+    xwing_hkdf_sha256_aes256_gcm = 0x0302,
 
     const Components = struct { kem: KemId, kdf: KdfId, aead: AeadId };
 
@@ -103,6 +104,7 @@ pub const CipherSuiteId = enum(u16) {
         .p384_hkdf_sha384_aes256_gcm = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
         .p384_hkdf_sha384_chacha20_poly1305 = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .chacha20_poly1305 },
         .xwing_hkdf_sha256_aes128_gcm = .{ .kem = .xwing, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
+        .xwing_hkdf_sha256_aes256_gcm = .{ .kem = .xwing, .kdf = .hkdf_sha256, .aead = .aes256_gcm },
     });
 
     /// Looks up the suite ID for a given KEM/KDF/AEAD triple, or null if unsupported.

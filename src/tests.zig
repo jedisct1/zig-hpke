@@ -74,6 +74,7 @@ test "cipher suite component roundtrip" {
         .p256_hkdf_sha256_aes128_gcm,
         .p384_hkdf_sha384_aes256_gcm,
         .xwing_hkdf_sha256_aes128_gcm,
+        .xwing_hkdf_sha256_aes256_gcm,
     };
 
     for (suites) |suite_id| {
