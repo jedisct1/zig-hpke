@@ -1,8 +1,56 @@
 # HPKE for Zig
 
-A Zig implementation of [Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html) (HPKE, RFC 9180).
+A Zig implementation of [Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html) (HPKE, RFC 9180) with post-quantum KEM support per [draft-ietf-hpke-pq-04](https://datatracker.ietf.org/doc/draft-ietf-hpke-pq/).
 
-Supports X25519, P-256, and P-384 KEMs with HKDF-SHA256/384/512 and AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 AEADs. All four modes are available: base, PSK, auth, and auth+PSK.
+## Supported algorithms
+
+### KEMs
+
+Classical (DHKEM):
+
+- X25519 (0x0020)
+- P-256 (0x0010)
+- P-384 (0x0011)
+
+Post-quantum (ML-KEM, FIPS 203):
+
+- ML-KEM-512 (0x0040)
+- ML-KEM-768 (0x0041)
+- ML-KEM-1024 (0x0042)
+
+Hybrid PQ/traditional:
+
+- MLKEM768-X25519 (0x647a)
+- MLKEM768-P256 (0x0050)
+- MLKEM1024-P384 (0x0051)
+
+### KDFs
+
+Two-stage (HKDF):
+
+- HKDF-SHA256 (0x0001)
+- HKDF-SHA384 (0x0002)
+- HKDF-SHA512 (0x0003)
+
+One-stage (XOF, draft-defined):
+
+- SHAKE128 (0x0010)
+- SHAKE256 (0x0011)
+- TurboSHAKE128 (0x0012)
+- TurboSHAKE256 (0x0013)
+
+### AEADs
+
+- AES-128-GCM (0x0001)
+- AES-256-GCM (0x0002)
+- ChaCha20-Poly1305 (0x0003)
+- Export-only (0xFFFF)
+
+### Modes
+
+All four HPKE modes are supported for classical KEMs: base, PSK, auth, and auth+PSK.
+
+Post-quantum KEMs support base and PSK modes only. Auth and auth+PSK are not defined for PQ KEMs per the draft specification.
 
 ## Usage
 
@@ -16,9 +64,7 @@ const hpke = @import("hpke");
 const h = hpke.Hpke.init(.x25519_hkdf_sha256_aes128_gcm);
 ```
 
-Other supported suites include `.p256_hkdf_sha256_aes128_gcm`, `.p384_hkdf_sha384_aes256_gcm`, `.x25519_hkdf_sha256_chacha20_poly1305`, and more.
-
-See `CipherSuiteId` for the full list.
+See `CipherSuiteId` for the full list of supported suites.
 
 ### Generating a key pair
 
@@ -39,6 +85,8 @@ var sk_r: [32]u8 = undefined;
 io.random(&sk_r);
 const pk_r = try std.crypto.dh.X25519.recoverPublicKey(sk_r);
 ```
+
+For PQ KEMs, secret keys are compact seeds (64 bytes for pure ML-KEM, 32 bytes for hybrids). Use `CipherSuite.init(suite_id)` to look up the exact `secret_key_length` and `public_key_length` for a given suite.
 
 ### Sender: encrypt a message
 
@@ -78,7 +126,7 @@ var sender = try h.senderSetupPSK(&pk_r, "info", "my-psk", "psk-id", io);
 var recipient = try h.recipientSetupPSK(enc, &sk_r, "info", "my-psk", "psk-id");
 ```
 
-### Auth mode
+### Auth mode (classical KEMs only)
 
 The sender authenticates with their own secret key:
 
@@ -92,6 +140,28 @@ Auth+PSK combines both:
 ```zig
 var sender = try h.senderSetupAuthPSK(&pk_r, "info", "my-psk", "psk-id", &sk_s, io);
 var recipient = try h.recipientSetupAuthPSK(enc, &sk_r, "info", "my-psk", "psk-id", &pk_s);
+```
+
+Auth modes are not supported for PQ KEMs and will return `error.WeakParameters`.
+
+### Post-quantum example
+
+```zig
+const h = hpke.Hpke.init(.ml_kem_768_hkdf_sha256_aes128_gcm);
+
+var ikm_r: [64]u8 = undefined;
+io.random(&ikm_r);
+const kp_r = h.deriveKeyPair(&ikm_r);
+
+var sender = try h.senderSetup(kp_r.pk[0..1184], "info", io);
+
+const pt = "Post-quantum hello!";
+var ct: [pt.len + 16]u8 = undefined;
+try sender.ctx.seal(&ct, pt, "aad");
+
+var recipient = try h.recipientSetup(sender.enc[0..sender.enc_length], kp_r.sk[0..64], "info");
+var decrypted: [pt.len]u8 = undefined;
+try recipient.open(&decrypted, &ct, "aad");
 ```
 
 ### Export secrets

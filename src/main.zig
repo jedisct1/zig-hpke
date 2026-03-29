@@ -12,20 +12,33 @@ pub const KemId = enum(u16) {
     p256_sha256 = 0x0010,
     p384_sha384 = 0x0011,
     x25519_sha256 = 0x0020,
+    ml_kem_512 = 0x0040,
+    ml_kem_768 = 0x0041,
+    ml_kem_1024 = 0x0042,
+    mlkem768_p256 = 0x0050,
+    mlkem1024_p384 = 0x0051,
+    mlkem768_x25519 = 0x647a,
 
-    /// Returns the KDF naturally paired with this KEM.
+    pub fn kemFlavor(self: KemId) enum { dhkem, pqkem } {
+        return switch (self) {
+            .p256_sha256, .p384_sha384, .x25519_sha256 => .dhkem,
+            else => .pqkem,
+        };
+    }
+
+    /// Returns the KDF naturally paired with this DHKEM.
     pub fn kdf(self: KemId) KdfId {
         return switch (self) {
             .x25519_sha256, .p256_sha256 => .hkdf_sha256,
             .p384_sha384 => .hkdf_sha384,
+            else => unreachable,
         };
     }
 
-    /// Returns the shared secret length in bytes for this KEM.
     pub fn nSecret(self: KemId) u16 {
         return switch (self) {
-            .x25519_sha256, .p256_sha256 => 32,
             .p384_sha384 => 48,
+            else => 32,
         };
     }
 
@@ -33,22 +46,81 @@ pub const KemId = enum(u16) {
         return switch (self) {
             .p256_sha256 => crypto.ecc.P256,
             .p384_sha384 => crypto.ecc.P384,
-            .x25519_sha256 => @compileError("X25519 is not a NIST curve"),
+            else => @compileError("not a NIST curve KEM"),
         };
+    }
+
+    fn PqKem(comptime self: KemId) type {
+        return switch (self) {
+            .ml_kem_512 => crypto.kem.ml_kem.MLKem512,
+            .ml_kem_768 => crypto.kem.ml_kem.MLKem768,
+            .ml_kem_1024 => crypto.kem.ml_kem.MLKem1024,
+            .mlkem768_x25519 => crypto.kem.hybrid.MlKem768X25519,
+            .mlkem768_p256 => crypto.kem.hybrid.MlKem768P256,
+            .mlkem1024_p384 => crypto.kem.hybrid.MlKem1024P384,
+            else => @compileError("not a PQ KEM"),
+        };
+    }
+
+    fn kemNsk(comptime self: KemId) usize {
+        return switch (self) {
+            .ml_kem_512, .ml_kem_768, .ml_kem_1024 => 64,
+            .mlkem768_p256, .mlkem1024_p384, .mlkem768_x25519 => 32,
+            else => @compileError("not a PQ KEM"),
+        };
+    }
+
+    fn makeKemSuiteId(self: KemId) [5]u8 {
+        var id: [5]u8 = undefined;
+        @memcpy(id[0..3], "KEM");
+        mem.writeInt(u16, id[3..5], @intFromEnum(self), .big);
+        return id;
     }
 };
 
 /// Key Derivation Function identifier.
 pub const KdfId = enum(u16) {
-    hkdf_sha256 = 1,
-    hkdf_sha384 = 2,
-    hkdf_sha512 = 3,
+    hkdf_sha256 = 0x0001,
+    hkdf_sha384 = 0x0002,
+    hkdf_sha512 = 0x0003,
+    shake128 = 0x0010,
+    shake256 = 0x0011,
+    turboshake128 = 0x0012,
+    turboshake256 = 0x0013,
+
+    pub fn kdfFlavor(self: KdfId) enum { two_stage, one_stage } {
+        return switch (self) {
+            .hkdf_sha256, .hkdf_sha384, .hkdf_sha512 => .two_stage,
+            else => .one_stage,
+        };
+    }
+
+    pub fn hashLength(self: KdfId) u16 {
+        return switch (self) {
+            .hkdf_sha256 => 32,
+            .hkdf_sha384 => 48,
+            .hkdf_sha512 => 64,
+            .shake128, .turboshake128 => 32,
+            .shake256, .turboshake256 => 64,
+        };
+    }
 
     fn Hmac(comptime self: KdfId) type {
         return switch (self) {
             .hkdf_sha256 => crypto.auth.hmac.sha2.HmacSha256,
             .hkdf_sha384 => crypto.auth.hmac.sha2.HmacSha384,
             .hkdf_sha512 => crypto.auth.hmac.sha2.HmacSha512,
+            else => @compileError("not a two-stage KDF"),
+        };
+    }
+
+    fn Xof(comptime self: KdfId) type {
+        return switch (self) {
+            .shake128 => crypto.hash.sha3.Shake128,
+            .shake256 => crypto.hash.sha3.Shake256,
+            .turboshake128 => crypto.hash.sha3.TurboShake128(null),
+            .turboshake256 => crypto.hash.sha3.TurboShake256(null),
+            else => @compileError("not a one-stage KDF"),
         };
     }
 };
@@ -83,6 +155,18 @@ pub const CipherSuiteId = enum(u16) {
     p256_hkdf_sha256_chacha20_poly1305 = 0x0103,
     p384_hkdf_sha384_aes256_gcm = 0x0202,
     p384_hkdf_sha384_chacha20_poly1305 = 0x0203,
+    ml_kem_512_hkdf_sha256_aes128_gcm = 0x0401,
+    ml_kem_768_hkdf_sha256_aes128_gcm = 0x0411,
+    ml_kem_1024_hkdf_sha384_aes256_gcm = 0x0422,
+    mlkem768_p256_hkdf_sha256_aes128_gcm = 0x0501,
+    mlkem1024_p384_hkdf_sha384_aes256_gcm = 0x0512,
+    mlkem768_x25519_hkdf_sha256_chacha20_poly1305 = 0x6403,
+    p256_shake128_aes128_gcm = 0x1001,
+    p384_shake256_aes256_gcm = 0x1102,
+    x25519_turboshake128_chacha20_poly1305 = 0x1203,
+    mlkem768_p256_shake128_aes256_gcm = 0x1502,
+    mlkem768_x25519_shake256_chacha20_poly1305 = 0x1163,
+    ml_kem_1024_turboshake256_aes128_gcm = 0x1341,
 
     const Components = struct { kem: KemId, kdf: KdfId, aead: AeadId };
 
@@ -98,6 +182,18 @@ pub const CipherSuiteId = enum(u16) {
         .p256_hkdf_sha256_chacha20_poly1305 = .{ .kem = .p256_sha256, .kdf = .hkdf_sha256, .aead = .chacha20_poly1305 },
         .p384_hkdf_sha384_aes256_gcm = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
         .p384_hkdf_sha384_chacha20_poly1305 = .{ .kem = .p384_sha384, .kdf = .hkdf_sha384, .aead = .chacha20_poly1305 },
+        .ml_kem_512_hkdf_sha256_aes128_gcm = .{ .kem = .ml_kem_512, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
+        .ml_kem_768_hkdf_sha256_aes128_gcm = .{ .kem = .ml_kem_768, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
+        .ml_kem_1024_hkdf_sha384_aes256_gcm = .{ .kem = .ml_kem_1024, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
+        .mlkem768_p256_hkdf_sha256_aes128_gcm = .{ .kem = .mlkem768_p256, .kdf = .hkdf_sha256, .aead = .aes128_gcm },
+        .mlkem1024_p384_hkdf_sha384_aes256_gcm = .{ .kem = .mlkem1024_p384, .kdf = .hkdf_sha384, .aead = .aes256_gcm },
+        .mlkem768_x25519_hkdf_sha256_chacha20_poly1305 = .{ .kem = .mlkem768_x25519, .kdf = .hkdf_sha256, .aead = .chacha20_poly1305 },
+        .p256_shake128_aes128_gcm = .{ .kem = .p256_sha256, .kdf = .shake128, .aead = .aes128_gcm },
+        .p384_shake256_aes256_gcm = .{ .kem = .p384_sha384, .kdf = .shake256, .aead = .aes256_gcm },
+        .x25519_turboshake128_chacha20_poly1305 = .{ .kem = .x25519_sha256, .kdf = .turboshake128, .aead = .chacha20_poly1305 },
+        .mlkem768_p256_shake128_aes256_gcm = .{ .kem = .mlkem768_p256, .kdf = .shake128, .aead = .aes256_gcm },
+        .mlkem768_x25519_shake256_chacha20_poly1305 = .{ .kem = .mlkem768_x25519, .kdf = .shake256, .aead = .chacha20_poly1305 },
+        .ml_kem_1024_turboshake256_aes128_gcm = .{ .kem = .ml_kem_1024, .kdf = .turboshake256, .aead = .aes128_gcm },
     });
 
     /// Looks up the suite ID for a given KEM/KDF/AEAD triple, or null if unsupported.
@@ -120,9 +216,9 @@ const max_hash_length = 64;
 const max_key_length = 32;
 const max_nonce_length = 12;
 const max_tag_length = 16;
-const max_enc_length = 97;
-const max_public_key_length = 97;
-const max_secret_key_length = 48;
+const max_enc_length = 1665;
+const max_public_key_length = 1665;
+const max_secret_key_length = 64;
 const max_shared_length = 96; // 2x for auth mode dual-DH
 
 /// Resolved parameters for a given `CipherSuiteId` -- key lengths, hash sizes, etc.
@@ -146,6 +242,12 @@ pub const CipherSuite = struct {
             .x25519_sha256 => .{ .pk = 32, .sk = 32, .enc = 32 },
             .p256_sha256 => .{ .pk = 65, .sk = 32, .enc = 65 },
             .p384_sha384 => .{ .pk = 97, .sk = 48, .enc = 97 },
+            .ml_kem_512 => .{ .pk = 800, .sk = 64, .enc = 768 },
+            .ml_kem_768 => .{ .pk = 1184, .sk = 64, .enc = 1088 },
+            .ml_kem_1024 => .{ .pk = 1568, .sk = 64, .enc = 1568 },
+            .mlkem768_p256 => .{ .pk = 1249, .sk = 32, .enc = 1153 },
+            .mlkem1024_p384 => .{ .pk = 1665, .sk = 32, .enc = 1665 },
+            .mlkem768_x25519 => .{ .pk = 1216, .sk = 32, .enc = 1120 },
         };
 
         return .{
@@ -156,11 +258,7 @@ pub const CipherSuite = struct {
             .public_key_length = kem_sizes.pk,
             .secret_key_length = kem_sizes.sk,
             .enc_length = kem_sizes.enc,
-            .hash_length = switch (components.kdf) {
-                .hkdf_sha256 => 32,
-                .hkdf_sha384 => 48,
-                .hkdf_sha512 => 64,
-            },
+            .hash_length = components.kdf.hashLength(),
             .key_length = switch (components.aead) {
                 .aes128_gcm => 16,
                 .aes256_gcm => 32,
@@ -261,7 +359,11 @@ pub const RecipientContext = struct {
 
 fn exportSecretImpl(suite: CipherSuite, exporter_secret: *const [max_hash_length]u8, out: []u8, exporter_context: []const u8) void {
     const suite_id = suite.makeSuiteId();
-    labeledExpand(suite.kdf, exporter_secret[0..suite.hash_length], "sec", exporter_context, &suite_id, out);
+    if (suite.kdf.kdfFlavor() == .one_stage) {
+        xofLabeledDerive(suite.kdf, exporter_secret[0..suite.hash_length], "sec", exporter_context, &suite_id, out);
+    } else {
+        labeledExpand(suite.kdf, exporter_secret[0..suite.hash_length], "sec", exporter_context, &suite_id, out);
+    }
 }
 
 fn computeNonce(base: []const u8, seq: u64, nn: u16) [max_nonce_length]u8 {
@@ -295,7 +397,7 @@ pub const SenderResult = struct {
     ctx: SenderContext,
 };
 
-/// HPKE (Hybrid Public Key Encryption) per RFC 9180.
+/// HPKE (Hybrid Public Key Encryption) per RFC 9180 and draft-ietf-hpke-pq-04.
 pub const Hpke = struct {
     suite: CipherSuite,
 
@@ -304,65 +406,70 @@ pub const Hpke = struct {
     }
 
     pub fn senderSetup(self: *const Hpke, pk_r: []const u8, info: []const u8, io: std.Io) SetupError!SenderResult {
-        return self.senderSetupCore(pk_r, info, .base, "", "", null, io);
+        return self.senderSetupCommon(pk_r, info, .base, "", "", null, io);
     }
 
     pub fn senderSetupDeterministic(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_e: []const u8) SetupError!SenderResult {
-        return self.senderSetupDeterministicCore(pk_r, info, .base, "", "", sk_e, null);
+        return self.senderSetupDeterministicCommon(pk_r, info, .base, "", "", sk_e, null);
     }
 
     pub fn senderSetupDeterministicPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_e: []const u8) SetupError!SenderResult {
-        return self.senderSetupDeterministicCore(pk_r, info, .psk, psk, psk_id, sk_e, null);
+        return self.senderSetupDeterministicCommon(pk_r, info, .psk, psk, psk_id, sk_e, null);
     }
 
     pub fn senderSetupDeterministicAuth(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_s: []const u8, sk_e: []const u8) SetupError!SenderResult {
-        return self.senderSetupDeterministicCore(pk_r, info, .auth, "", "", sk_e, sk_s);
+        return self.senderSetupDeterministicCommon(pk_r, info, .auth, "", "", sk_e, sk_s);
     }
 
     pub fn senderSetupDeterministicAuthPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_s: []const u8, sk_e: []const u8) SetupError!SenderResult {
-        return self.senderSetupDeterministicCore(pk_r, info, .auth_psk, psk, psk_id, sk_e, sk_s);
+        return self.senderSetupDeterministicCommon(pk_r, info, .auth_psk, psk, psk_id, sk_e, sk_s);
     }
 
     pub fn recipientSetup(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8) SetupError!RecipientContext {
-        return self.recipientSetupCore(enc, sk_r, info, .base, "", "", null);
+        return self.recipientSetupCommon(enc, sk_r, info, .base, "", "", null);
     }
 
     pub fn senderSetupPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, io: std.Io) SetupError!SenderResult {
-        return self.senderSetupCore(pk_r, info, .psk, psk, psk_id, null, io);
+        return self.senderSetupCommon(pk_r, info, .psk, psk, psk_id, null, io);
     }
 
     pub fn recipientSetupPSK(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8) SetupError!RecipientContext {
-        return self.recipientSetupCore(enc, sk_r, info, .psk, psk, psk_id, null);
+        return self.recipientSetupCommon(enc, sk_r, info, .psk, psk, psk_id, null);
     }
 
     pub fn senderSetupAuth(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_s: []const u8, io: std.Io) SetupError!SenderResult {
-        return self.senderSetupCore(pk_r, info, .auth, "", "", sk_s, io);
+        return self.senderSetupCommon(pk_r, info, .auth, "", "", sk_s, io);
     }
 
     pub fn recipientSetupAuth(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, pk_s: []const u8) SetupError!RecipientContext {
-        return self.recipientSetupCore(enc, sk_r, info, .auth, "", "", pk_s);
+        return self.recipientSetupCommon(enc, sk_r, info, .auth, "", "", pk_s);
     }
 
     pub fn senderSetupAuthPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_s: []const u8, io: std.Io) SetupError!SenderResult {
-        return self.senderSetupCore(pk_r, info, .auth_psk, psk, psk_id, sk_s, io);
+        return self.senderSetupCommon(pk_r, info, .auth_psk, psk, psk_id, sk_s, io);
     }
 
     pub fn recipientSetupAuthPSK(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, pk_s: []const u8) SetupError!RecipientContext {
-        return self.recipientSetupCore(enc, sk_r, info, .auth_psk, psk, psk_id, pk_s);
+        return self.recipientSetupCommon(enc, sk_r, info, .auth_psk, psk, psk_id, pk_s);
     }
 
-    pub fn deriveKeyPair(self: *const Hpke, seed: []const u8) struct { sk: [max_secret_key_length]u8, pk: [max_public_key_length]u8 } {
-        var kem_suite_id: [5]u8 = undefined;
-        @memcpy(kem_suite_id[0..3], "KEM");
-        mem.writeInt(u16, kem_suite_id[3..5], @intFromEnum(self.suite.kem), .big);
+    const DerivedKeyPair = struct { sk: [max_secret_key_length]u8, pk: [max_public_key_length]u8 };
+    const PqEncapResult = struct { shared_secret: [32]u8, enc: [max_enc_length]u8, enc_len: usize };
+
+    pub fn deriveKeyPair(self: *const Hpke, seed: []const u8) DerivedKeyPair {
+        const kem_suite_id = self.suite.kem.makeKemSuiteId();
+
+        if (self.suite.kem.kemFlavor() == .pqkem) {
+            return pqDeriveKeyPair(self.suite.kem, seed, &kem_suite_id);
+        }
+
+        var sk: [max_secret_key_length]u8 = @splat(0);
+        var pk: [max_public_key_length]u8 = @splat(0);
 
         const kem_kdf = self.suite.kem.kdf();
         const n_secret = self.suite.kem.nSecret();
         var prk: [max_hash_length]u8 = undefined;
         labeledExtract(kem_kdf, "", "dkp_prk", seed, &kem_suite_id, prk[0..n_secret]);
-
-        var sk: [max_secret_key_length]u8 = @splat(0);
-        var pk: [max_public_key_length]u8 = @splat(0);
 
         switch (self.suite.kem) {
             .x25519_sha256 => {
@@ -386,11 +493,56 @@ pub const Hpke = struct {
                 const pk_bytes = pk_point.toUncompressedSec1();
                 @memcpy(pk[0 .. 1 + 2 * n], &pk_bytes);
             },
+            else => unreachable,
         }
         return .{ .sk = sk, .pk = pk };
     }
 
-    fn senderSetupDeterministicCore(self: *const Hpke, pk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, sk_e: []const u8, sk_s: ?[]const u8) SetupError!SenderResult {
+    fn pqDeriveKeyPair(kem: KemId, seed: []const u8, kem_suite_id: *const [5]u8) DerivedKeyPair {
+        switch (kem) {
+            inline .ml_kem_512,
+            .ml_kem_768,
+            .ml_kem_1024,
+            .mlkem768_x25519,
+            .mlkem768_p256,
+            .mlkem1024_p384,
+            => |tag| {
+                const Kem = tag.PqKem();
+                const nsk = comptime tag.kemNsk();
+
+                var dk_seed: [max_secret_key_length]u8 = @splat(0);
+                xofLabeledDerive(.shake256, seed, "DeriveKeyPair", "", kem_suite_id, dk_seed[0..nsk]);
+
+                var sk: [max_secret_key_length]u8 = @splat(0);
+                var pk: [max_public_key_length]u8 = @splat(0);
+                @memcpy(sk[0..nsk], dk_seed[0..nsk]);
+
+                const kp = Kem.KeyPair.generateDeterministic(dk_seed[0..nsk].*) catch unreachable;
+                const pk_bytes = kp.public_key.toBytes();
+                @memcpy(pk[0..pk_bytes.len], &pk_bytes);
+
+                return .{ .sk = sk, .pk = pk };
+            },
+            else => unreachable,
+        }
+    }
+
+    fn senderSetupDeterministicCommon(
+        self: *const Hpke,
+        pk_r: []const u8,
+        info: []const u8,
+        mode: Mode,
+        psk: []const u8,
+        psk_id: []const u8,
+        sk_e: []const u8,
+        sk_s: ?[]const u8,
+    ) SetupError!SenderResult {
+        if (self.suite.kem.kemFlavor() == .pqkem) {
+            if (mode == .auth or mode == .auth_psk) return error.WeakParameters;
+            const result = try pqEncapDeterministic(self.suite.kem, pk_r, sk_e);
+            return try keySchedule(self.suite, mode, &result.shared_secret, info, psk, psk_id, result.enc[0..result.enc_len]);
+        }
+
         const pk_e = try publicKeyFromSecret(self.suite.kem, sk_e);
         const pk_e_len = self.suite.enc_length;
 
@@ -420,14 +572,44 @@ pub const Hpke = struct {
         return try keySchedule(self.suite, mode, shared_secret_arr[0..n], info, psk, psk_id, pk_e[0..pk_e_len]);
     }
 
-    fn senderSetupCore(self: *const Hpke, pk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, sk_s: ?[]const u8, io: std.Io) SetupError!SenderResult {
+    fn senderSetupCommon(
+        self: *const Hpke,
+        pk_r: []const u8,
+        info: []const u8,
+        mode: Mode,
+        psk: []const u8,
+        psk_id: []const u8,
+        sk_s: ?[]const u8,
+        io: std.Io,
+    ) SetupError!SenderResult {
+        if (self.suite.kem.kemFlavor() == .pqkem) {
+            if (mode == .auth or mode == .auth_psk) return error.WeakParameters;
+            const result = try pqEncap(self.suite.kem, pk_r, io);
+            return try keySchedule(self.suite, mode, &result.shared_secret, info, psk, psk_id, result.enc[0..result.enc_len]);
+        }
+
         var seed: [max_secret_key_length]u8 = undefined;
         io.random(seed[0..self.suite.secret_key_length]);
         const kp_e = self.deriveKeyPair(seed[0..self.suite.secret_key_length]);
-        return self.senderSetupDeterministicCore(pk_r, info, mode, psk, psk_id, kp_e.sk[0..self.suite.secret_key_length], sk_s);
+        return self.senderSetupDeterministicCommon(pk_r, info, mode, psk, psk_id, kp_e.sk[0..self.suite.secret_key_length], sk_s);
     }
 
-    fn recipientSetupCore(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, mode: Mode, psk: []const u8, psk_id: []const u8, pk_s: ?[]const u8) SetupError!RecipientContext {
+    fn recipientSetupCommon(
+        self: *const Hpke,
+        enc: []const u8,
+        sk_r: []const u8,
+        info: []const u8,
+        mode: Mode,
+        psk: []const u8,
+        psk_id: []const u8,
+        pk_s: ?[]const u8,
+    ) SetupError!RecipientContext {
+        if (self.suite.kem.kemFlavor() == .pqkem) {
+            if (mode == .auth or mode == .auth_psk) return error.WeakParameters;
+            const shared_secret = try pqDecap(self.suite.kem, enc, sk_r);
+            return try keyScheduleImpl(RecipientContext, self.suite, mode, &shared_secret, info, psk, psk_id);
+        }
+
         const pk_r_arr = try publicKeyFromSecret(self.suite.kem, sk_r);
         const pk_r_len = self.suite.public_key_length;
 
@@ -455,6 +637,79 @@ pub const Hpke = struct {
         return try keyScheduleImpl(RecipientContext, self.suite, mode, shared_secret_arr[0..n], info, psk, psk_id);
     }
 
+    fn pqEncap(kem: KemId, pk_r: []const u8, io: std.Io) SetupError!PqEncapResult {
+        switch (kem) {
+            inline .ml_kem_512, .ml_kem_768, .ml_kem_1024 => |tag| {
+                const Kem = tag.PqKem();
+                if (pk_r.len != Kem.PublicKey.encoded_length) return error.InvalidEncoding;
+                const pk = Kem.PublicKey.fromBytes(pk_r[0..Kem.PublicKey.encoded_length]) catch return error.InvalidEncoding;
+                const result = pk.encaps(io);
+                var enc: [max_enc_length]u8 = undefined;
+                @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
+                return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
+            },
+            inline .mlkem768_x25519, .mlkem768_p256, .mlkem1024_p384 => |tag| {
+                const Kem = tag.PqKem();
+                if (pk_r.len != Kem.PublicKey.encoded_length) return error.InvalidEncoding;
+                const pk = Kem.PublicKey.fromBytes(pk_r[0..Kem.PublicKey.encoded_length]);
+                const result = pk.encaps(io) catch return error.InvalidEncoding;
+                var enc: [max_enc_length]u8 = undefined;
+                @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
+                return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
+            },
+            else => unreachable,
+        }
+    }
+
+    fn pqEncapDeterministic(kem: KemId, pk_r: []const u8, seed: []const u8) SetupError!PqEncapResult {
+        switch (kem) {
+            inline .ml_kem_512, .ml_kem_768, .ml_kem_1024 => |tag| {
+                const Kem = tag.PqKem();
+                if (pk_r.len != Kem.PublicKey.encoded_length) return error.InvalidEncoding;
+                if (seed.len != Kem.encaps_seed_length) return error.InvalidEncoding;
+                const pk = Kem.PublicKey.fromBytes(pk_r[0..Kem.PublicKey.encoded_length]) catch return error.InvalidEncoding;
+                const result = pk.encapsDeterministic(seed[0..Kem.encaps_seed_length]);
+                var enc: [max_enc_length]u8 = undefined;
+                @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
+                return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
+            },
+            inline .mlkem768_x25519, .mlkem768_p256, .mlkem1024_p384 => |tag| {
+                const Kem = tag.PqKem();
+                if (pk_r.len != Kem.PublicKey.encoded_length) return error.InvalidEncoding;
+                const pk = Kem.PublicKey.fromBytes(pk_r[0..Kem.PublicKey.encoded_length]);
+                const result = pk.encapsDeterministic(seed) catch return error.InvalidEncoding;
+                var enc: [max_enc_length]u8 = undefined;
+                @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
+                return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
+            },
+            else => unreachable,
+        }
+    }
+
+    fn pqDecap(kem: KemId, enc: []const u8, sk_seed: []const u8) SetupError![32]u8 {
+        switch (kem) {
+            inline .ml_kem_512, .ml_kem_768, .ml_kem_1024 => |tag| {
+                const Kem = tag.PqKem();
+                const nsk = comptime tag.kemNsk();
+                const ct_len = comptime @typeInfo(@FieldType(Kem.EncapsulatedSecret, "ciphertext")).array.len;
+                if (sk_seed.len != nsk) return error.InvalidEncoding;
+                if (enc.len != ct_len) return error.InvalidEncoding;
+                const kp = Kem.KeyPair.generateDeterministic(sk_seed[0..nsk].*) catch return error.InvalidEncoding;
+                return kp.secret_key.decaps(enc[0..ct_len]) catch return error.InvalidEncoding;
+            },
+            inline .mlkem768_x25519, .mlkem768_p256, .mlkem1024_p384 => |tag| {
+                const Kem = tag.PqKem();
+                const nsk = comptime tag.kemNsk();
+                const ct_len = comptime @typeInfo(@FieldType(Kem.EncapsulatedSecret, "ciphertext")).array.len;
+                if (sk_seed.len != nsk) return error.InvalidEncoding;
+                if (enc.len != ct_len) return error.InvalidEncoding;
+                const sk = Kem.SecretKey.fromBytes(sk_seed[0..nsk]);
+                return sk.decaps(enc[0..ct_len]) catch return error.InvalidEncoding;
+            },
+            else => unreachable,
+        }
+    }
+
     fn publicKeyFromSecret(kem: KemId, sk: []const u8) SetupError![max_public_key_length]u8 {
         var pk: [max_public_key_length]u8 = undefined;
         switch (kem) {
@@ -470,6 +725,20 @@ pub const Hpke = struct {
                 const pk_point = try Curve.basePoint.mul(sk[0..n].*, .big);
                 const pk_bytes = pk_point.toUncompressedSec1();
                 @memcpy(pk[0 .. 1 + 2 * n], &pk_bytes);
+            },
+            inline .ml_kem_512,
+            .ml_kem_768,
+            .ml_kem_1024,
+            .mlkem768_x25519,
+            .mlkem768_p256,
+            .mlkem1024_p384,
+            => |tag| {
+                const Kem = tag.PqKem();
+                const nsk = comptime tag.kemNsk();
+                if (sk.len != nsk) return error.InvalidEncoding;
+                const kp = Kem.KeyPair.generateDeterministic(sk[0..nsk].*) catch return error.InvalidEncoding;
+                const pk_bytes = kp.public_key.toBytes();
+                @memcpy(pk[0..pk_bytes.len], &pk_bytes);
             },
         }
         return pk;
@@ -493,11 +762,20 @@ pub const Hpke = struct {
                 const shared_x = shared_point.affineCoordinates().x.toBytes(.big);
                 @memcpy(dh[0..n], &shared_x);
             },
+            else => unreachable,
         }
         return dh;
     }
 
-    fn keySchedule(suite: CipherSuite, mode: Mode, shared_secret: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, enc: []const u8) SetupError!SenderResult {
+    fn keySchedule(
+        suite: CipherSuite,
+        mode: Mode,
+        shared_secret: []const u8,
+        info: []const u8,
+        psk: []const u8,
+        psk_id: []const u8,
+        enc: []const u8,
+    ) SetupError!SenderResult {
         var result = SenderResult{
             .enc = @as([max_enc_length]u8, @splat(0)),
             .enc_length = enc.len,
@@ -515,9 +793,30 @@ pub const Hpke = struct {
         if (!got_psk and (mode == .psk or mode == .auth_psk)) return error.WeakParameters;
     }
 
-    fn keyScheduleImpl(comptime Ctx: type, suite: CipherSuite, mode: Mode, shared_secret: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8) SetupError!Ctx {
+    fn keyScheduleImpl(
+        comptime Ctx: type,
+        suite: CipherSuite,
+        mode: Mode,
+        shared_secret: []const u8,
+        info: []const u8,
+        psk: []const u8,
+        psk_id: []const u8,
+    ) SetupError!Ctx {
         try verifyPskInputs(mode, psk, psk_id);
         const suite_id = suite.makeSuiteId();
+
+        var ctx = Ctx{
+            .suite = suite,
+            .key = @as([max_key_length]u8, @splat(0)),
+            .base_nonce = @as([max_nonce_length]u8, @splat(0)),
+            .sequence = 0,
+            .exporter_secret = @as([max_hash_length]u8, @splat(0)),
+        };
+
+        if (suite.kdf.kdfFlavor() == .one_stage) {
+            oneStageKeySchedule(suite, mode, shared_secret, info, psk, psk_id, &suite_id, ctx.key[0..suite.key_length], ctx.base_nonce[0..suite.nonce_length], ctx.exporter_secret[0..suite.hash_length]);
+            return ctx;
+        }
 
         var psk_id_hash: [max_hash_length]u8 = undefined;
         labeledExtract(suite.kdf, "", "psk_id_hash", psk_id, &suite_id, psk_id_hash[0..suite.hash_length]);
@@ -533,14 +832,6 @@ pub const Hpke = struct {
         var secret: [max_hash_length]u8 = undefined;
         labeledExtract(suite.kdf, shared_secret, "secret", psk, &suite_id, secret[0..suite.hash_length]);
 
-        var ctx = Ctx{
-            .suite = suite,
-            .key = @as([max_key_length]u8, @splat(0)),
-            .base_nonce = @as([max_nonce_length]u8, @splat(0)),
-            .sequence = 0,
-            .exporter_secret = @as([max_hash_length]u8, @splat(0)),
-        };
-
         const ks_ctx = ks_context[0 .. 1 + 2 * suite.hash_length];
         labeledExpand(suite.kdf, secret[0..suite.hash_length], "key", ks_ctx, &suite_id, ctx.key[0..suite.key_length]);
         labeledExpand(suite.kdf, secret[0..suite.hash_length], "base_nonce", ks_ctx, &suite_id, ctx.base_nonce[0..suite.nonce_length]);
@@ -549,10 +840,46 @@ pub const Hpke = struct {
         return ctx;
     }
 
+    fn oneStageKeySchedule(
+        suite: CipherSuite,
+        mode: Mode,
+        shared_secret: []const u8,
+        info: []const u8,
+        psk: []const u8,
+        psk_id: []const u8,
+        suite_id: *const [10]u8,
+        key_out: []u8,
+        nonce_out: []u8,
+        exp_out: []u8,
+    ) void {
+        const secret_len = key_out.len + nonce_out.len + exp_out.len;
+        switch (suite.kdf) {
+            inline .shake128, .shake256, .turboshake128, .turboshake256 => |tag| {
+                const Xof = tag.Xof();
+                var hasher = Xof.init(.{});
+                updateLengthPrefixed(&hasher, psk);
+                updateLengthPrefixed(&hasher, shared_secret);
+                hasher.update("HPKE-v1");
+                hasher.update(suite_id);
+                const label = "secret";
+                hasher.update(&[2]u8{ 0, label.len });
+                hasher.update(label);
+                var out_len: [2]u8 = undefined;
+                mem.writeInt(u16, &out_len, @intCast(secret_len), .big);
+                hasher.update(&out_len);
+                hasher.update(&[1]u8{@intFromEnum(mode)});
+                updateLengthPrefixed(&hasher, psk_id);
+                updateLengthPrefixed(&hasher, info);
+                hasher.squeeze(key_out);
+                hasher.squeeze(nonce_out);
+                hasher.squeeze(exp_out);
+            },
+            else => unreachable,
+        }
+    }
+
     fn kemExtractAndExpand(suite: CipherSuite, dh: []const u8, kem_context: []const u8) [max_shared_length]u8 {
-        var kem_suite_id: [5]u8 = undefined;
-        @memcpy(kem_suite_id[0..3], "KEM");
-        mem.writeInt(u16, kem_suite_id[3..5], @intFromEnum(suite.kem), .big);
+        const kem_suite_id = suite.kem.makeKemSuiteId();
 
         const kem_kdf = suite.kem.kdf();
         const kem_hash_len = suite.kem.nSecret();
@@ -578,25 +905,54 @@ pub fn serializeSuiteId(suite: CipherSuiteId) [2]u8 {
     return bytes;
 }
 
+fn updateLengthPrefixed(hasher: anytype, data: []const u8) void {
+    var len_bytes: [2]u8 = undefined;
+    mem.writeInt(u16, &len_bytes, @intCast(data.len), .big);
+    hasher.update(&len_bytes);
+    hasher.update(data);
+}
+
+fn xofLabeledDerive(kdf_id: KdfId, ikm: []const u8, comptime label: []const u8, context: []const u8, suite_id: []const u8, out: []u8) void {
+    switch (kdf_id) {
+        inline .shake128, .shake256, .turboshake128, .turboshake256 => |tag| {
+            const Xof = tag.Xof();
+            var hasher = Xof.init(.{});
+            hasher.update(ikm);
+            hasher.update("HPKE-v1");
+            hasher.update(suite_id);
+            const label_len: [2]u8 = comptime .{
+                @intCast(label.len >> 8),
+                @intCast(label.len & 0xff),
+            };
+            hasher.update(&label_len);
+            hasher.update(label);
+            var out_len: [2]u8 = undefined;
+            mem.writeInt(u16, &out_len, @intCast(out.len), .big);
+            hasher.update(&out_len);
+            hasher.update(context);
+            hasher.squeeze(out);
+        },
+        else => unreachable,
+    }
+}
+
 fn labeledExtract(kdf_id: KdfId, salt: []const u8, comptime label: []const u8, ikm: []const u8, suite_id: []const u8, out: []u8) void {
     assert(suite_id.len <= 10);
     switch (kdf_id) {
-        inline else => |tag| hkdfExtractLabeled(tag.Hmac(), salt, label, ikm, suite_id, out),
+        inline .hkdf_sha256, .hkdf_sha384, .hkdf_sha512 => |tag| hkdfExtractLabeled(tag.Hmac(), salt, label, ikm, suite_id, out),
+        else => unreachable,
     }
 }
 
 fn labeledExpand(kdf_id: KdfId, prk: []const u8, comptime label: []const u8, info: []const u8, suite_id: []const u8, out: []u8) void {
     assert(suite_id.len <= 10);
-    assert(out.len <= maxExpandLength(kdf_id));
     switch (kdf_id) {
-        inline else => |tag| hkdfExpandLabeled(tag.Hmac(), prk, label, info, suite_id, out),
+        inline .hkdf_sha256, .hkdf_sha384, .hkdf_sha512 => |tag| {
+            assert(out.len <= 255 * tag.Hmac().mac_length);
+            hkdfExpandLabeled(tag.Hmac(), prk, label, info, suite_id, out);
+        },
+        else => unreachable,
     }
-}
-
-fn maxExpandLength(kdf_id: KdfId) usize {
-    return switch (kdf_id) {
-        inline else => |tag| 255 * tag.Hmac().mac_length,
-    };
 }
 
 fn hkdfExtractLabeled(comptime Hmac: type, salt: []const u8, comptime label: []const u8, ikm: []const u8, suite_id: []const u8, out: []u8) void {
