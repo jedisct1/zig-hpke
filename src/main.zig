@@ -19,6 +19,7 @@ pub const KemId = enum(u16) {
     mlkem1024_p384 = 0x0051,
     mlkem768_x25519 = 0x647a,
 
+    /// Returns whether this KEM is a classical DHKEM or a post-quantum KEM.
     pub fn kemFlavor(self: KemId) enum { dhkem, pqkem } {
         return switch (self) {
             .p256_sha256, .p384_sha384, .x25519_sha256 => .dhkem,
@@ -35,6 +36,7 @@ pub const KemId = enum(u16) {
         };
     }
 
+    /// Returns the shared secret length in bytes for this KEM (Nsecret).
     pub fn nSecret(self: KemId) u16 {
         return switch (self) {
             .p384_sha384 => 48,
@@ -88,6 +90,7 @@ pub const KdfId = enum(u16) {
     turboshake128 = 0x0012,
     turboshake256 = 0x0013,
 
+    /// Returns whether this KDF uses HKDF (two-stage extract-then-expand) or a XOF (one-stage).
     pub fn kdfFlavor(self: KdfId) enum { two_stage, one_stage } {
         return switch (self) {
             .hkdf_sha256, .hkdf_sha384, .hkdf_sha512 => .two_stage,
@@ -95,6 +98,7 @@ pub const KdfId = enum(u16) {
         };
     }
 
+    /// Returns the output length in bytes for this KDF (Nh).
     pub fn hashLength(self: KdfId) u16 {
         return switch (self) {
             .hkdf_sha256 => 32,
@@ -235,6 +239,7 @@ pub const CipherSuite = struct {
     nonce_length: u16,
     tag_length: u16,
 
+    /// Resolves all parameters (key lengths, hash sizes, etc.) for the given suite.
     pub fn init(suite_id: CipherSuiteId) CipherSuite {
         const components = suite_id.getComponents();
 
@@ -286,9 +291,16 @@ pub const CipherSuite = struct {
     }
 };
 
+/// Returned when attempting AEAD operations on an export-only context.
 pub const ExportOnlyError = error{ExportOnlyMode};
+
+/// Returned when the AEAD sequence number overflows.
 pub const MessageLimitError = error{MessageLimitReached};
+
+/// Errors from `SenderContext.seal`.
 pub const SealError = ExportOnlyError || MessageLimitError || crypto.errors.EncodingError;
+
+/// Errors from `RecipientContext.open`.
 pub const OpenError = ExportOnlyError || MessageLimitError || crypto.errors.EncodingError || crypto.errors.AuthenticationError;
 
 /// Sender encryption context for a single HPKE session.
@@ -299,6 +311,7 @@ pub const SenderContext = struct {
     sequence: u64,
     exporter_secret: [max_hash_length]u8,
 
+    /// Encrypts `plaintext` with associated data, writing ciphertext || tag to `out`.
     pub fn seal(self: *SenderContext, out: []u8, plaintext: []const u8, aad: []const u8) SealError!void {
         if (self.suite.aead == .export_only) return error.ExportOnlyMode;
         if (out.len != plaintext.len + self.suite.tag_length) return error.InvalidEncoding;
@@ -319,6 +332,7 @@ pub const SenderContext = struct {
         self.sequence += 1;
     }
 
+    /// Derives a secret of arbitrary length from the HPKE context.
     pub fn exportSecret(self: *const SenderContext, out: []u8, exporter_context: []const u8) void {
         exportSecretImpl(self.suite, &self.exporter_secret, out, exporter_context);
     }
@@ -332,6 +346,7 @@ pub const RecipientContext = struct {
     sequence: u64,
     exporter_secret: [max_hash_length]u8,
 
+    /// Decrypts and authenticates `ciphertext_with_tag` with associated data, writing plaintext to `out`.
     pub fn open(self: *RecipientContext, out: []u8, ciphertext_with_tag: []const u8, aad: []const u8) OpenError!void {
         if (self.suite.aead == .export_only) return error.ExportOnlyMode;
         if (ciphertext_with_tag.len < self.suite.tag_length) return error.InvalidEncoding;
@@ -352,6 +367,7 @@ pub const RecipientContext = struct {
         self.sequence += 1;
     }
 
+    /// Derives a secret of arbitrary length from the HPKE context.
     pub fn exportSecret(self: *const RecipientContext, out: []u8, exporter_context: []const u8) void {
         exportSecretImpl(self.suite, &self.exporter_secret, out, exporter_context);
     }
@@ -383,6 +399,7 @@ fn computeNonce(base: []const u8, seq: u64, nn: u16) [max_nonce_length]u8 {
     return nonce;
 }
 
+/// Errors from sender/recipient setup operations.
 pub const SetupError = crypto.errors.IdentityElementError ||
     crypto.errors.EncodingError ||
     crypto.errors.NonCanonicalError ||
@@ -401,66 +418,82 @@ pub const SenderResult = struct {
 pub const Hpke = struct {
     suite: CipherSuite,
 
+    /// Creates an HPKE instance for the given cipher suite.
     pub fn init(suite_id: CipherSuiteId) Hpke {
         return .{ .suite = CipherSuite.init(suite_id) };
     }
 
+    /// Returns the public key length in bytes for this suite's KEM.
     pub fn publicKeyLength(self: *const Hpke) u16 {
         return self.suite.public_key_length;
     }
 
+    /// Returns the secret key length in bytes for this suite's KEM.
     pub fn secretKeyLength(self: *const Hpke) u16 {
         return self.suite.secret_key_length;
     }
 
+    /// Returns the encapsulated key length in bytes for this suite's KEM.
     pub fn encLength(self: *const Hpke) u16 {
         return self.suite.enc_length;
     }
 
+    /// Sets up a sender context in base mode with a random ephemeral key.
     pub fn senderSetup(self: *const Hpke, pk_r: []const u8, info: []const u8, io: std.Io) SetupError!SenderResult {
         return self.senderSetupCommon(pk_r, info, .base, "", "", null, io);
     }
 
+    /// Sets up a sender context in base mode with a caller-supplied ephemeral secret key.
     pub fn senderSetupDeterministic(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_e: []const u8) SetupError!SenderResult {
         return self.senderSetupDeterministicCommon(pk_r, info, .base, "", "", sk_e, null);
     }
 
+    /// Sets up a sender context in PSK mode with a caller-supplied ephemeral secret key.
     pub fn senderSetupDeterministicPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_e: []const u8) SetupError!SenderResult {
         return self.senderSetupDeterministicCommon(pk_r, info, .psk, psk, psk_id, sk_e, null);
     }
 
+    /// Sets up a sender context in auth mode with a caller-supplied ephemeral secret key.
     pub fn senderSetupDeterministicAuth(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_s: []const u8, sk_e: []const u8) SetupError!SenderResult {
         return self.senderSetupDeterministicCommon(pk_r, info, .auth, "", "", sk_e, sk_s);
     }
 
+    /// Sets up a sender context in auth+PSK mode with a caller-supplied ephemeral secret key.
     pub fn senderSetupDeterministicAuthPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_s: []const u8, sk_e: []const u8) SetupError!SenderResult {
         return self.senderSetupDeterministicCommon(pk_r, info, .auth_psk, psk, psk_id, sk_e, sk_s);
     }
 
+    /// Sets up a recipient context in base mode.
     pub fn recipientSetup(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8) SetupError!RecipientContext {
         return self.recipientSetupCommon(enc, sk_r, info, .base, "", "", null);
     }
 
+    /// Sets up a sender context in PSK mode with a random ephemeral key.
     pub fn senderSetupPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, io: std.Io) SetupError!SenderResult {
         return self.senderSetupCommon(pk_r, info, .psk, psk, psk_id, null, io);
     }
 
+    /// Sets up a recipient context in PSK mode.
     pub fn recipientSetupPSK(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8) SetupError!RecipientContext {
         return self.recipientSetupCommon(enc, sk_r, info, .psk, psk, psk_id, null);
     }
 
+    /// Sets up a sender context in auth mode with a random ephemeral key.
     pub fn senderSetupAuth(self: *const Hpke, pk_r: []const u8, info: []const u8, sk_s: []const u8, io: std.Io) SetupError!SenderResult {
         return self.senderSetupCommon(pk_r, info, .auth, "", "", sk_s, io);
     }
 
+    /// Sets up a recipient context in auth mode.
     pub fn recipientSetupAuth(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, pk_s: []const u8) SetupError!RecipientContext {
         return self.recipientSetupCommon(enc, sk_r, info, .auth, "", "", pk_s);
     }
 
+    /// Sets up a sender context in auth+PSK mode with a random ephemeral key.
     pub fn senderSetupAuthPSK(self: *const Hpke, pk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, sk_s: []const u8, io: std.Io) SetupError!SenderResult {
         return self.senderSetupCommon(pk_r, info, .auth_psk, psk, psk_id, sk_s, io);
     }
 
+    /// Sets up a recipient context in auth+PSK mode.
     pub fn recipientSetupAuthPSK(self: *const Hpke, enc: []const u8, sk_r: []const u8, info: []const u8, psk: []const u8, psk_id: []const u8, pk_s: []const u8) SetupError!RecipientContext {
         return self.recipientSetupCommon(enc, sk_r, info, .auth_psk, psk, psk_id, pk_s);
     }
@@ -468,6 +501,7 @@ pub const Hpke = struct {
     const DerivedKeyPair = struct { sk: [max_secret_key_length]u8, pk: [max_public_key_length]u8 };
     const PqEncapResult = struct { shared_secret: [32]u8, enc: [max_enc_length]u8, enc_len: usize };
 
+    /// Deterministically derives a key pair from a seed using the suite's KEM.
     pub fn deriveKeyPair(self: *const Hpke, seed: []const u8) DerivedKeyPair {
         const kem_suite_id = self.suite.kem.makeKemSuiteId();
 
