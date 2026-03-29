@@ -74,8 +74,8 @@ Using `deriveKeyPair` (deterministic, from a seed):
 var seed: [32]u8 = undefined;
 io.random(&seed);
 const kp = h.deriveKeyPair(&seed);
-const sk_r = kp.sk[0..32];
-const pk_r = kp.pk[0..32];
+const sk_r = kp.secret_key[0..32];
+const pk_r = kp.public_key[0..32];
 ```
 
 Or directly for X25519:
@@ -86,7 +86,7 @@ io.random(&sk_r);
 const pk_r = try std.crypto.dh.X25519.recoverPublicKey(sk_r);
 ```
 
-For PQ KEMs, secret keys are compact seeds (64 bytes for pure ML-KEM, 32 bytes for hybrids). Use `CipherSuite.init(suite_id)` to look up the exact `secret_key_length` and `public_key_length` for a given suite.
+For PQ KEMs, secret keys are compact seeds (64 bytes for pure ML-KEM, 32 bytes for hybrids). Use `h.suite.secret_key_length` and `h.suite.public_key_length` to look up the exact lengths for a given suite.
 
 ### Sender: encrypt a message
 
@@ -100,7 +100,7 @@ var ciphertext: [plaintext.len + 16]u8 = undefined;
 try sender.ctx.seal(&ciphertext, plaintext, "associated data");
 ```
 
-Send `sender.enc[0..sender.enc_length]` and `ciphertext` to the recipient.
+Send `sender.encapsulatedSecret()` and `ciphertext` to the recipient.
 
 Nonces are incremented automatically, so `seal` can be called multiple times on the same context. The ciphertext is 16 bytes (the AEAD tag) longer than the plaintext.
 
@@ -153,13 +153,13 @@ var ikm_r: [64]u8 = undefined;
 io.random(&ikm_r);
 const kp_r = h.deriveKeyPair(&ikm_r);
 
-var sender = try h.senderSetup(kp_r.pk[0..1184], "info", io);
+var sender = try h.senderSetup(kp_r.public_key[0..1184], "info", io);
 
 const pt = "Post-quantum hello!";
 var ct: [pt.len + 16]u8 = undefined;
 try sender.ctx.seal(&ct, pt, "aad");
 
-var recipient = try h.recipientSetup(sender.enc[0..sender.enc_length], kp_r.sk[0..64], "info");
+var recipient = try h.recipientSetup(sender.encapsulatedSecret(), kp_r.secret_key[0..64], "info");
 var decrypted: [pt.len]u8 = undefined;
 try recipient.open(&decrypted, &ct, "aad");
 ```

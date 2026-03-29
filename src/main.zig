@@ -412,6 +412,11 @@ pub const SenderResult = struct {
     enc: [max_enc_length]u8,
     enc_length: usize,
     ctx: SenderContext,
+
+    /// Returns the encapsulated secret as an exact-length slice.
+    pub fn encapsulatedSecret(self: *const SenderResult) []const u8 {
+        return self.enc[0..self.enc_length];
+    }
 };
 
 /// HPKE (Hybrid Public Key Encryption) per RFC 9180 and draft-ietf-hpke-pq-04.
@@ -421,21 +426,6 @@ pub const Hpke = struct {
     /// Creates an HPKE instance for the given cipher suite.
     pub fn init(suite_id: CipherSuiteId) Hpke {
         return .{ .suite = CipherSuite.init(suite_id) };
-    }
-
-    /// Returns the public key length in bytes for this suite's KEM.
-    pub fn publicKeyLength(self: *const Hpke) u16 {
-        return self.suite.public_key_length;
-    }
-
-    /// Returns the secret key length in bytes for this suite's KEM.
-    pub fn secretKeyLength(self: *const Hpke) u16 {
-        return self.suite.secret_key_length;
-    }
-
-    /// Returns the encapsulated key length in bytes for this suite's KEM.
-    pub fn encLength(self: *const Hpke) u16 {
-        return self.suite.enc_length;
     }
 
     /// Sets up a sender context in base mode with a random ephemeral key.
@@ -498,11 +488,11 @@ pub const Hpke = struct {
         return self.recipientSetupCommon(enc, sk_r, info, .auth_psk, psk, psk_id, pk_s);
     }
 
-    const DerivedKeyPair = struct { sk: [max_secret_key_length]u8, pk: [max_public_key_length]u8 };
+    pub const KeyPair = struct { secret_key: [max_secret_key_length]u8, public_key: [max_public_key_length]u8 };
     const PqEncapResult = struct { shared_secret: [32]u8, enc: [max_enc_length]u8, enc_len: usize };
 
     /// Deterministically derives a key pair from a seed using the suite's KEM.
-    pub fn deriveKeyPair(self: *const Hpke, seed: []const u8) DerivedKeyPair {
+    pub fn deriveKeyPair(self: *const Hpke, seed: []const u8) KeyPair {
         const kem_suite_id = self.suite.kem.makeKemSuiteId();
 
         if (self.suite.kem.kemFlavor() == .pqkem) {
@@ -541,10 +531,10 @@ pub const Hpke = struct {
             },
             else => unreachable,
         }
-        return .{ .sk = sk, .pk = pk };
+        return .{ .secret_key = sk, .public_key = pk };
     }
 
-    fn pqDeriveKeyPair(kem: KemId, seed: []const u8, kem_suite_id: *const [5]u8) DerivedKeyPair {
+    fn pqDeriveKeyPair(kem: KemId, seed: []const u8, kem_suite_id: *const [5]u8) KeyPair {
         switch (kem) {
             inline .ml_kem_512,
             .ml_kem_768,
@@ -559,15 +549,15 @@ pub const Hpke = struct {
                 var dk_seed: [max_secret_key_length]u8 = @splat(0);
                 xofLabeledDerive(.shake256, seed, "DeriveKeyPair", "", kem_suite_id, dk_seed[0..nsk]);
 
-                var sk: [max_secret_key_length]u8 = @splat(0);
-                var pk: [max_public_key_length]u8 = @splat(0);
-                @memcpy(sk[0..nsk], dk_seed[0..nsk]);
+                var secret_key: [max_secret_key_length]u8 = @splat(0);
+                var public_key: [max_public_key_length]u8 = @splat(0);
+                @memcpy(secret_key[0..nsk], dk_seed[0..nsk]);
 
                 const kp = Kem.KeyPair.generateDeterministic(dk_seed[0..nsk].*) catch unreachable;
                 const pk_bytes = kp.public_key.toBytes();
-                @memcpy(pk[0..pk_bytes.len], &pk_bytes);
+                @memcpy(public_key[0..pk_bytes.len], &pk_bytes);
 
-                return .{ .sk = sk, .pk = pk };
+                return .{ .secret_key = secret_key, .public_key = public_key };
             },
             else => unreachable,
         }
@@ -637,7 +627,7 @@ pub const Hpke = struct {
         var seed: [max_secret_key_length]u8 = undefined;
         io.random(seed[0..self.suite.secret_key_length]);
         const kp_e = self.deriveKeyPair(seed[0..self.suite.secret_key_length]);
-        return self.senderSetupDeterministicCommon(pk_r, info, mode, psk, psk_id, kp_e.sk[0..self.suite.secret_key_length], sk_s);
+        return self.senderSetupDeterministicCommon(pk_r, info, mode, psk, psk_id, kp_e.secret_key[0..self.suite.secret_key_length], sk_s);
     }
 
     fn recipientSetupCommon(
