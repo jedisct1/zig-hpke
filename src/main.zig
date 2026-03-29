@@ -413,6 +413,10 @@ pub const Hpke = struct {
         return self.suite.secret_key_length;
     }
 
+    pub fn encLength(self: *const Hpke) u16 {
+        return self.suite.enc_length;
+    }
+
     pub fn senderSetup(self: *const Hpke, pk_r: []const u8, info: []const u8, io: std.Io) SetupError!SenderResult {
         return self.senderSetupCommon(pk_r, info, .base, "", "", null, io);
     }
