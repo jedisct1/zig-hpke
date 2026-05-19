@@ -521,7 +521,7 @@ pub const Hpke = struct {
                     if (counter > 255) unreachable;
                     labeledExpand(kem_kdf, prk[0..n_secret], "candidate", &[_]u8{counter}, &kem_suite_id, sk[0..n]);
                     sk[0] &= 0xFF;
-                    const sk_int = mem.readInt(std.meta.Int(.unsigned, n * 8), sk[0..n], .big);
+                    const sk_int = mem.readInt(@Int(.unsigned, n * 8), sk[0..n], .big);
                     if (sk_int == 0 or sk_int >= Curve.scalar.field_order) continue;
                     break;
                 }
