@@ -12,7 +12,7 @@ test "basic encrypt/decrypt roundtrip" {
 
     var sk_r: [32]u8 = undefined;
     io.random(&sk_r);
-    const pk_r = try std.crypto.dh.X25519.recoverPublicKey(sk_r);
+    const pk_r = std.crypto.dh.X25519.recoverPublicKey(sk_r);
 
     var sender = try h.senderSetup(&pk_r, "test info", io);
     var recipient = try h.recipientSetup(sender.encapsulatedSecret(), &sk_r, "test info");
@@ -33,7 +33,7 @@ test "export secret" {
 
     var sk_r: [32]u8 = undefined;
     io.random(&sk_r);
-    const pk_r = try std.crypto.dh.X25519.recoverPublicKey(sk_r);
+    const pk_r = std.crypto.dh.X25519.recoverPublicKey(sk_r);
 
     var sender = try h.senderSetup(&pk_r, "test info", io);
     const recipient = try h.recipientSetup(sender.encapsulatedSecret(), &sk_r, "test info");
@@ -52,7 +52,7 @@ test "wrong key fails decryption" {
 
     var sk_r: [32]u8 = undefined;
     io.random(&sk_r);
-    const pk_r = try std.crypto.dh.X25519.recoverPublicKey(sk_r);
+    const pk_r = std.crypto.dh.X25519.recoverPublicKey(sk_r);
 
     var sender = try h.senderSetup(&pk_r, "test info", io);
 

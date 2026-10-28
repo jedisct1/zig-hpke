@@ -202,8 +202,7 @@ pub const CipherSuiteId = enum(u16) {
 
     /// Looks up the suite ID for a given KEM/KDF/AEAD triple, or null if unsupported.
     pub fn fromComponents(kem: KemId, kdf: KdfId, aead: AeadId) ?CipherSuiteId {
-        inline for (@typeInfo(CipherSuiteId).@"enum".fields) |f| {
-            const id: CipherSuiteId = @enumFromInt(f.value);
+        inline for (std.enums.values(CipherSuiteId)) |id| {
             const c = comptime suite_map.get(id);
             if (c.kem == kem and c.kdf == kdf and c.aead == aead) return id;
         }
@@ -510,7 +509,7 @@ pub const Hpke = struct {
         switch (self.suite.kem) {
             .x25519_sha256 => {
                 labeledExpand(kem_kdf, prk[0..n_secret], "sk", "", &kem_suite_id, sk[0..32]);
-                const pk_32 = crypto.dh.X25519.recoverPublicKey(sk[0..32].*) catch unreachable;
+                const pk_32 = crypto.dh.X25519.recoverPublicKey(sk[0..32].*);
                 @memcpy(pk[0..32], &pk_32);
             },
             inline .p256_sha256, .p384_sha384 => |tag| {
@@ -713,7 +712,8 @@ pub const Hpke = struct {
                 const Kem = tag.PqKem();
                 if (pk_r.len != Kem.PublicKey.encoded_length) return error.InvalidEncoding;
                 const pk = Kem.PublicKey.fromBytes(pk_r[0..Kem.PublicKey.encoded_length]);
-                const result = pk.encapsDeterministic(seed) catch return error.InvalidEncoding;
+                if (seed.len != Kem.encaps_seed_length) return error.InvalidEncoding;
+                const result = pk.encapsDeterministic(seed[0..Kem.encaps_seed_length]) catch return error.InvalidEncoding;
                 var enc: [max_enc_length]u8 = undefined;
                 @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
                 return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
@@ -751,7 +751,7 @@ pub const Hpke = struct {
         switch (kem) {
             .x25519_sha256 => {
                 if (sk.len != 32) return error.InvalidEncoding;
-                const pk_32 = try crypto.dh.X25519.recoverPublicKey(sk[0..32].*);
+                const pk_32 = crypto.dh.X25519.recoverPublicKey(sk[0..32].*);
                 @memcpy(pk[0..32], &pk_32);
             },
             inline .p256_sha256, .p384_sha384 => |tag| {
