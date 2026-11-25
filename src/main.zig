@@ -712,8 +712,12 @@ pub const Hpke = struct {
                 const Kem = tag.PqKem();
                 if (pk_r.len != Kem.PublicKey.encoded_length) return error.InvalidEncoding;
                 const pk = Kem.PublicKey.fromBytes(pk_r[0..Kem.PublicKey.encoded_length]);
-                if (seed.len != Kem.encaps_seed_length) return error.InvalidEncoding;
-                const result = pk.encapsDeterministic(seed[0..Kem.encaps_seed_length]) catch return error.InvalidEncoding;
+                var enc_seed: [Kem.encaps_seed_length]u8 = @splat(0);
+                if (seed.len != Kem.encaps_seed_length and
+                    !(tag == .mlkem768_p256 and seed.len == Kem.encaps_seed_length - 32))
+                    return error.InvalidEncoding;
+                @memcpy(enc_seed[0..seed.len], seed);
+                const result = pk.encapsDeterministic(&enc_seed) catch return error.InvalidEncoding;
                 var enc: [max_enc_length]u8 = undefined;
                 @memcpy(enc[0..result.ciphertext.len], &result.ciphertext);
                 return .{ .shared_secret = result.shared_secret, .enc = enc, .enc_len = result.ciphertext.len };
